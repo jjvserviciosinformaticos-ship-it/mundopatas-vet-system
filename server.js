@@ -1454,6 +1454,8 @@ app.put('/api/notificaciones/:id/leer', authenticateToken, (req, res) => {
 });
 
 // Función para generar notificaciones automáticas
+// TEMPORALMENTE DESHABILITADO PARA DEPLOYMENT
+// setInterval(generarNotificacionesAutomaticas, 5 * 60 * 1000);
 const generarNotificacionesAutomaticas = async () => {
     try {
         // Notificaciones de vacunas próximas a vencer
