@@ -419,6 +419,75 @@ app.get('/api/paciente/informe/:mascotaId', async (req, res) => {
     }
 });
 
+// Clientes con sus mascotas - Endpoint optimizado
+app.get('/api/clientes-con-mascotas', authenticateToken, async (req, res) => {
+    try {
+        const sql = `
+            SELECT 
+                c.id as cliente_id,
+                c.nombre as cliente_nombre,
+                c.apellido as cliente_apellido,
+                c.telefono as cliente_telefono,
+                c.email as cliente_email,
+                c.direccion as cliente_direccion,
+                c.fecha_registro as cliente_fecha_registro,
+                m.id as mascota_id,
+                m.nombre as mascota_nombre,
+                m.especie,
+                m.raza,
+                m.edad,
+                m.peso,
+                m.color,
+                m.sexo,
+                m.fecha_registro as mascota_fecha_registro
+            FROM clientes c
+            LEFT JOIN mascotas m ON c.id = m.cliente_id
+            WHERE c.veterinario_id = $1
+            ORDER BY c.fecha_registro DESC, m.fecha_registro DESC
+        `;
+        
+        const result = await pool.query(sql, [req.user.id]);
+        const rows = result.rows;
+        
+        // Agrupar resultados por cliente
+        const clientesMap = new Map();
+        
+        rows.forEach(row => {
+            if (!clientesMap.has(row.cliente_id)) {
+                clientesMap.set(row.cliente_id, {
+                    id: row.cliente_id,
+                    nombre: row.cliente_nombre,
+                    apellido: row.cliente_apellido,
+                    telefono: row.cliente_telefono,
+                    email: row.cliente_email,
+                    direccion: row.cliente_direccion,
+                    fecha_registro: row.cliente_fecha_registro,
+                    mascotas: []
+                });
+            }
+            
+            if (row.mascota_id) {
+                clientesMap.get(row.cliente_id).mascotas.push({
+                    id: row.mascota_id,
+                    nombre: row.mascota_nombre,
+                    especie: row.especie,
+                    raza: row.raza,
+                    edad: row.edad,
+                    peso: row.peso,
+                    color: row.color,
+                    sexo: row.sexo,
+                    fecha_registro: row.mascota_fecha_registro
+                });
+            }
+        });
+        
+        res.json(Array.from(clientesMap.values()));
+    } catch (error) {
+        console.error('Error obteniendo clientes con mascotas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // Servir archivos estáticos
 app.use('/uploads', express.static('uploads'));
 
