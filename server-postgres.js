@@ -430,7 +430,7 @@ app.get('/api/clientes-con-mascotas', authenticateToken, async (req, res) => {
                 c.telefono as cliente_telefono,
                 c.email as cliente_email,
                 c.direccion as cliente_direccion,
-                c.fecha_registro as cliente_fecha_registro,
+                c.created_at as cliente_fecha_registro,
                 m.id as mascota_id,
                 m.nombre as mascota_nombre,
                 m.especie,
@@ -439,11 +439,11 @@ app.get('/api/clientes-con-mascotas', authenticateToken, async (req, res) => {
                 m.peso,
                 m.color,
                 m.sexo,
-                m.fecha_registro as mascota_fecha_registro
+                m.created_at as mascota_fecha_registro
             FROM clientes c
             LEFT JOIN mascotas m ON c.id = m.cliente_id
             WHERE c.veterinario_id = $1
-            ORDER BY c.fecha_registro DESC, m.fecha_registro DESC
+            ORDER BY c.created_at DESC, m.created_at DESC
         `;
         
         const result = await pool.query(sql, [req.user.id]);
@@ -512,3 +512,4 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
