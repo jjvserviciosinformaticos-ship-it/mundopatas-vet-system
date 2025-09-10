@@ -1464,10 +1464,9 @@ const generarNotificacionesAutomaticas = async () => {
                         JOIN clientes c ON m.cliente_id = c.id
                         WHERE v.fecha_proxima <= date('now', '+7 days') AND v.fecha_proxima > date('now')`;
             
-            db.all(sql, [], (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
+            db.query(sql, (err, result) => {
+    if (err) reject(err);
+    else resolve(result.rows); });
         });
         
         for (const vacuna of vacunasProximas) {
