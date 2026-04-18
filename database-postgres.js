@@ -29,6 +29,16 @@ async function initializeDatabase() {
                 telefono TEXT,
                 direccion TEXT,
                 rol TEXT DEFAULT 'admin',
+                -- Configuración de pagos
+                cbu_cvu TEXT,
+                alias_cbu TEXT,
+                titular_cuenta TEXT,
+                mercadopago_access_token TEXT,
+                mercadopago_public_key TEXT,
+                precio_consulta DECIMAL(10,2) DEFAULT 5000.00,
+                acepta_mercadopago BOOLEAN DEFAULT false,
+                acepta_transferencia BOOLEAN DEFAULT true,
+                acepta_efectivo BOOLEAN DEFAULT true,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
@@ -47,15 +57,56 @@ async function initializeDatabase() {
             )
         `);
         
-        // Agregar columna password_portal si no existe (para bases de datos existentes)
+        // Agregar columnas si no existen (para bases de datos existentes)
         await pool.query(`
             DO $$ 
             BEGIN 
+                -- Columna password_portal en clientes
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns 
                     WHERE table_name='clientes' AND column_name='password_portal'
                 ) THEN
                     ALTER TABLE clientes ADD COLUMN password_portal TEXT;
+                END IF;
+                
+                -- Columnas de configuración de pagos en veterinarios
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='cbu_cvu') THEN
+                    ALTER TABLE veterinarios ADD COLUMN cbu_cvu TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='alias_cbu') THEN
+                    ALTER TABLE veterinarios ADD COLUMN alias_cbu TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='titular_cuenta') THEN
+                    ALTER TABLE veterinarios ADD COLUMN titular_cuenta TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='mercadopago_access_token') THEN
+                    ALTER TABLE veterinarios ADD COLUMN mercadopago_access_token TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='mercadopago_public_key') THEN
+                    ALTER TABLE veterinarios ADD COLUMN mercadopago_public_key TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='precio_consulta') THEN
+                    ALTER TABLE veterinarios ADD COLUMN precio_consulta DECIMAL(10,2) DEFAULT 5000.00;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='acepta_mercadopago') THEN
+                    ALTER TABLE veterinarios ADD COLUMN acepta_mercadopago BOOLEAN DEFAULT false;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='acepta_transferencia') THEN
+                    ALTER TABLE veterinarios ADD COLUMN acepta_transferencia BOOLEAN DEFAULT true;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='acepta_efectivo') THEN
+                    ALTER TABLE veterinarios ADD COLUMN acepta_efectivo BOOLEAN DEFAULT true;
+                END IF;
+                
+                -- Columnas para integración con ARCA/AFIP
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='arca_cuit') THEN
+                    ALTER TABLE veterinarios ADD COLUMN arca_cuit TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='arca_api_key') THEN
+                    ALTER TABLE veterinarios ADD COLUMN arca_api_key TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='arca_punto_venta') THEN
+                    ALTER TABLE veterinarios ADD COLUMN arca_punto_venta INTEGER DEFAULT 1;
                 END IF;
             END $$;
         `);
@@ -162,6 +213,14 @@ async function initializeDatabase() {
                 ) THEN
                     ALTER TABLE mascotas ADD COLUMN gramos_diarios DECIMAL(6,2);
                 END IF;
+                
+                -- Agregar contiene_granos si no existe
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='mascotas' AND column_name='contiene_granos'
+                ) THEN
+                    ALTER TABLE mascotas ADD COLUMN contiene_granos TEXT;
+                END IF;
             END $$;
         `);
 
@@ -180,6 +239,117 @@ async function initializeDatabase() {
         `);
         
         // Migrar campos adicionales si no existen (ejecutar migrate-consultas.js para agregar todos los campos)
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                -- Agregar proxima_desparasitacion si no existe
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='proxima_desparasitacion'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN proxima_desparasitacion DATE;
+                END IF;
+                
+                -- Agregar campos de semiología si no existen
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='temperatura'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN temperatura DECIMAL(4,2);
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='frecuencia_cardiaca'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN frecuencia_cardiaca INTEGER;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='frecuencia_respiratoria'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN frecuencia_respiratoria INTEGER;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='peso_consulta'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN peso_consulta DECIMAL(5,2);
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='estado_corporal'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN estado_corporal TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='hidratacion'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN hidratacion TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='mucosas'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN mucosas TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='tiempo_llenado_capilar'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN tiempo_llenado_capilar TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='pulso'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN pulso TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='diagnostico'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN diagnostico TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='tratamiento'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN tratamiento TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='estudios_complementarios'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN estudios_complementarios TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='desparasitacion_interna'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN desparasitacion_interna TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='consultas' AND column_name='desparasitacion_externa'
+                ) THEN
+                    ALTER TABLE consultas ADD COLUMN desparasitacion_externa TEXT;
+                END IF;
+            END $$;
+        `);
 
         await pool.query(`
             CREATE TABLE IF NOT EXISTS analisis (
@@ -212,6 +382,67 @@ async function initializeDatabase() {
             )
         `);
 
+        // Tabla de Preguntas Frecuentes (FAQ)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS faq (
+                id SERIAL PRIMARY KEY,
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                pregunta TEXT NOT NULL,
+                respuesta TEXT NOT NULL,
+                orden INTEGER DEFAULT 0,
+                activo BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Tabla de Ubicaciones y Valoraciones
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS ubicaciones (
+                id SERIAL PRIMARY KEY,
+                veterinario_id INTEGER REFERENCES veterinarios(id) UNIQUE,
+                latitud DECIMAL(10, 8),
+                longitud DECIMAL(11, 8),
+                direccion_completa TEXT,
+                ciudad TEXT,
+                provincia TEXT,
+                codigo_postal TEXT,
+                zona TEXT,
+                visible_en_mapa BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS valoraciones (
+                id SERIAL PRIMARY KEY,
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                cliente_id INTEGER REFERENCES clientes(id),
+                puntuacion INTEGER CHECK (puntuacion >= 1 AND puntuacion <= 5),
+                categoria TEXT,
+                comentario TEXT,
+                aprobado BOOLEAN DEFAULT false,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Tabla de Protocolos de Trabajo
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS protocolos_trabajo (
+                id SERIAL PRIMARY KEY,
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                titulo TEXT NOT NULL,
+                descripcion TEXT NOT NULL,
+                categoria TEXT,
+                contenido TEXT NOT NULL,
+                orden INTEGER DEFAULT 0,
+                activo BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         // Nuevas tablas para funcionalidades premium
         await pool.query(`
             CREATE TABLE IF NOT EXISTS citas (
@@ -223,8 +454,54 @@ async function initializeDatabase() {
                 motivo TEXT NOT NULL,
                 estado TEXT DEFAULT 'programada',
                 observaciones TEXT,
+                monto DECIMAL(10,2) DEFAULT 0,
+                metodo_pago TEXT DEFAULT 'efectivo',
+                pago_confirmado BOOLEAN DEFAULT false,
+                payment_id TEXT,
+                fecha_pago TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        `);
+        
+        // Migración: Agregar campos de pago si no existen
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='citas' AND column_name='monto'
+                ) THEN
+                    ALTER TABLE citas ADD COLUMN monto DECIMAL(10,2) DEFAULT 0;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='citas' AND column_name='metodo_pago'
+                ) THEN
+                    ALTER TABLE citas ADD COLUMN metodo_pago TEXT DEFAULT 'efectivo';
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='citas' AND column_name='pago_confirmado'
+                ) THEN
+                    ALTER TABLE citas ADD COLUMN pago_confirmado BOOLEAN DEFAULT false;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='citas' AND column_name='payment_id'
+                ) THEN
+                    ALTER TABLE citas ADD COLUMN payment_id TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='citas' AND column_name='fecha_pago'
+                ) THEN
+                    ALTER TABLE citas ADD COLUMN fecha_pago TIMESTAMP;
+                END IF;
+            END $$;
         `);
 
         await pool.query(`
@@ -238,8 +515,40 @@ async function initializeDatabase() {
                 impuestos DECIMAL(10,2) DEFAULT 0,
                 total DECIMAL(10,2) NOT NULL,
                 estado TEXT DEFAULT 'pendiente',
+                -- Campos de integración con ARCA/AFIP
+                arca_cae TEXT,
+                arca_cae_vencimiento DATE,
+                arca_tipo_comprobante TEXT,
+                arca_punto_venta INTEGER,
+                arca_numero_comprobante BIGINT,
+                arca_sincronizada BOOLEAN DEFAULT false,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        `);
+        
+        // Agregar columnas ARCA si no existen
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='facturas' AND column_name='arca_cae') THEN
+                    ALTER TABLE facturas ADD COLUMN arca_cae TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='facturas' AND column_name='arca_cae_vencimiento') THEN
+                    ALTER TABLE facturas ADD COLUMN arca_cae_vencimiento DATE;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='facturas' AND column_name='arca_tipo_comprobante') THEN
+                    ALTER TABLE facturas ADD COLUMN arca_tipo_comprobante TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='facturas' AND column_name='arca_punto_venta') THEN
+                    ALTER TABLE facturas ADD COLUMN arca_punto_venta INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='facturas' AND column_name='arca_numero_comprobante') THEN
+                    ALTER TABLE facturas ADD COLUMN arca_numero_comprobante BIGINT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='facturas' AND column_name='arca_sincronizada') THEN
+                    ALTER TABLE facturas ADD COLUMN arca_sincronizada BOOLEAN DEFAULT false;
+                END IF;
+            END $$;
         `);
 
         await pool.query(`
@@ -266,30 +575,84 @@ async function initializeDatabase() {
         `);
 
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS inventario_medicamentos (
+            CREATE TABLE IF NOT EXISTS inventario_productos (
                 id SERIAL PRIMARY KEY,
                 veterinario_id INTEGER REFERENCES veterinarios(id),
+                codigo_barras TEXT,
                 nombre TEXT NOT NULL,
                 descripcion TEXT,
-                categoria TEXT,
+                categoria TEXT NOT NULL,
+                tipo TEXT NOT NULL,
+                marca TEXT,
+                presentacion TEXT,
                 stock_actual INTEGER NOT NULL DEFAULT 0,
                 stock_minimo INTEGER DEFAULT 10,
+                stock_maximo INTEGER DEFAULT 100,
                 precio_compra DECIMAL(10,2),
                 precio_venta DECIMAL(10,2),
                 fecha_vencimiento DATE,
+                lote TEXT,
                 proveedor TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ubicacion TEXT,
+                imagen_url TEXT,
+                activo BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        `);
+        
+        // Migración de tabla antigua a nueva
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='inventario_medicamentos') THEN
+                    INSERT INTO inventario_productos (
+                        veterinario_id, nombre, descripcion, categoria, tipo,
+                        stock_actual, stock_minimo, precio_compra, precio_venta,
+                        fecha_vencimiento, proveedor, created_at
+                    )
+                    SELECT 
+                        veterinario_id, nombre, descripcion, categoria, 'medicamento',
+                        stock_actual, stock_minimo, precio_compra, precio_venta,
+                        fecha_vencimiento, proveedor, created_at
+                    FROM inventario_medicamentos
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM inventario_productos 
+                        WHERE inventario_productos.nombre = inventario_medicamentos.nombre
+                        AND inventario_productos.veterinario_id = inventario_medicamentos.veterinario_id
+                    );
+                END IF;
+            END $$;
         `);
 
         await pool.query(`
             CREATE TABLE IF NOT EXISTS movimientos_inventario (
                 id SERIAL PRIMARY KEY,
-                medicamento_id INTEGER REFERENCES inventario_medicamentos(id),
+                producto_id INTEGER REFERENCES inventario_productos(id),
+                veterinario_id INTEGER REFERENCES veterinarios(id),
                 tipo_movimiento TEXT NOT NULL,
                 cantidad INTEGER NOT NULL,
                 motivo TEXT,
+                usuario TEXT,
+                stock_anterior INTEGER,
+                stock_nuevo INTEGER,
                 fecha_movimiento TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS servicios_veterinaria (
+                id SERIAL PRIMARY KEY,
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                nombre TEXT NOT NULL,
+                descripcion TEXT,
+                duracion_minutos INTEGER DEFAULT 30,
+                precio DECIMAL(10,2),
+                activo BOOLEAN DEFAULT true,
+                orden INTEGER DEFAULT 0,
+                icono TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
 
@@ -396,7 +759,145 @@ async function initializeDatabase() {
             )
         `);
 
+        // Tabla para licencias del sistema
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS licencias (
+                id SERIAL PRIMARY KEY,
+                clave VARCHAR(100) UNIQUE NOT NULL,
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                tipo VARCHAR(50) NOT NULL DEFAULT 'PREMIUM',
+                estado VARCHAR(50) NOT NULL DEFAULT 'disponible',
+                fecha_generacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fecha_activacion TIMESTAMP,
+                fecha_expiracion TIMESTAMP,
+                activa BOOLEAN DEFAULT false,
+                notas TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Índices para mejorar rendimiento
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_licencias_clave ON licencias(clave);
+            CREATE INDEX IF NOT EXISTS idx_licencias_veterinario ON licencias(veterinario_id);
+            CREATE INDEX IF NOT EXISTS idx_licencias_estado ON licencias(estado);
+        `);
+
+        // Agregar columnas de licencia a veterinarios si no existen
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='licencia_activa') THEN
+                    ALTER TABLE veterinarios ADD COLUMN licencia_activa BOOLEAN DEFAULT false;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='tipo_cuenta') THEN
+                    ALTER TABLE veterinarios ADD COLUMN tipo_cuenta VARCHAR(50) DEFAULT 'DEMO';
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='veterinarios' AND column_name='fecha_expiracion_demo') THEN
+                    ALTER TABLE veterinarios ADD COLUMN fecha_expiracion_demo TIMESTAMP;
+                END IF;
+            END $$;
+        `);
+
+        // ==================== TABLAS PARA CONTROL PERSONAL DE CLIENTES ====================
+        
+        // Tabla para registrar clientes y sus pagos (uso personal del administrador)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS mis_clientes_ventas (
+                id SERIAL PRIMARY KEY,
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                licencia_id INTEGER REFERENCES licencias(id),
+                
+                -- Datos del cliente
+                nombre_completo VARCHAR(200) NOT NULL,
+                email VARCHAR(200),
+                telefono VARCHAR(50),
+                whatsapp VARCHAR(50),
+                clinica_nombre VARCHAR(200),
+                ciudad VARCHAR(100),
+                provincia VARCHAR(100),
+                
+                -- Datos de pago
+                monto_pagado DECIMAL(10,2),
+                moneda VARCHAR(10) DEFAULT 'ARS',
+                metodo_pago VARCHAR(50),
+                fecha_pago DATE,
+                comprobante_numero VARCHAR(100),
+                comprobante_foto TEXT,
+                
+                -- Estado de la venta
+                estado_venta VARCHAR(50) DEFAULT 'completada',
+                tipo_venta VARCHAR(50) DEFAULT 'nueva',
+                
+                -- Notas personales
+                notas TEXT,
+                seguimiento TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Tabla para historial de pagos y renovaciones
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS historial_pagos_clientes (
+                id SERIAL PRIMARY KEY,
+                cliente_venta_id INTEGER REFERENCES mis_clientes_ventas(id),
+                veterinario_id INTEGER REFERENCES veterinarios(id),
+                
+                -- Datos del pago
+                monto DECIMAL(10,2) NOT NULL,
+                moneda VARCHAR(10) DEFAULT 'ARS',
+                metodo_pago VARCHAR(50),
+                fecha_pago DATE NOT NULL,
+                comprobante_numero VARCHAR(100),
+                comprobante_foto TEXT,
+                
+                -- Tipo de pago
+                tipo VARCHAR(50) DEFAULT 'renovacion',
+                concepto TEXT,
+                
+                -- Notas
+                notas TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Tabla para recordatorios de renovación
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS recordatorios_renovacion (
+                id SERIAL PRIMARY KEY,
+                cliente_venta_id INTEGER REFERENCES mis_clientes_ventas(id),
+                
+                -- Datos del recordatorio
+                fecha_recordatorio DATE NOT NULL,
+                dias_antes_vencimiento INTEGER,
+                mensaje TEXT,
+                
+                -- Estado
+                enviado BOOLEAN DEFAULT false,
+                fecha_envio TIMESTAMP,
+                metodo_envio VARCHAR(50),
+                
+                -- Timestamps
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Índices para mejorar rendimiento
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_mis_clientes_veterinario ON mis_clientes_ventas(veterinario_id);
+            CREATE INDEX IF NOT EXISTS idx_mis_clientes_licencia ON mis_clientes_ventas(licencia_id);
+            CREATE INDEX IF NOT EXISTS idx_historial_pagos_cliente ON historial_pagos_clientes(cliente_venta_id);
+            CREATE INDEX IF NOT EXISTS idx_recordatorios_cliente ON recordatorios_renovacion(cliente_venta_id);
+        `);
+
         console.log('✅ Base de datos PostgreSQL inicializada correctamente');
+        console.log('✅ Tablas de control personal de clientes creadas');
     } catch (error) {
         console.error('❌ Error inicializando base de datos:', error);
         throw error;
