@@ -36,22 +36,65 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-// Middleware de autenticación
+// Middleware de autenticación mejorado
 function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-        return res.status(401).json({ error: 'Token de acceso requerido' });
-    }
-
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            return res.status(403).json({ error: 'Token inválido' });
+    try {
+        // Obtener el token del encabezado de autorización
+        const authHeader = req.headers['authorization'];
+        
+        // Verificar si el encabezado de autorización existe
+        if (!authHeader) {
+            console.warn('⚠️  Intento de acceso sin token de autorización');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Token de acceso requerido',
+                message: 'Debes iniciar sesión para acceder a este recurso'
+            });
         }
-        req.user = user;
-        next();
-    });
+
+        // Extraer el token (formato: 'Bearer token')
+        const token = authHeader.split(' ')[1];
+        
+        if (!token) {
+            console.warn('⚠️  Formato de token inválido');
+            return res.status(401).json({ 
+                success: false,
+                error: 'Formato de token inválido',
+                message: 'El formato del token debe ser: Bearer <token>'
+            });
+        }
+
+        // Verificar el token
+        jwt.verify(token, JWT_SECRET, (err, user) => {
+            if (err) {
+                console.error('❌ Error al verificar el token:', err.message);
+                
+                let errorMessage = 'Token inválido';
+                if (err.name === 'TokenExpiredError') {
+                    errorMessage = 'El token ha expirado';
+                } else if (err.name === 'JsonWebTokenError') {
+                    errorMessage = 'Token mal formado';
+                }
+                
+                return res.status(403).json({ 
+                    success: false,
+                    error: errorMessage,
+                    message: 'No tienes permiso para acceder a este recurso'
+                });
+            }
+            
+            // Token válido, adjuntar usuario a la solicitud
+            req.user = user;
+            next();
+        });
+    } catch (error) {
+        console.error('❌ Error en el middleware de autenticación:', error);
+        return res.status(500).json({ 
+            success: false,
+            error: 'Error interno del servidor',
+            message: 'Ocurrió un error al procesar la autenticación'
+        });
+    }
 }
 
 // Inicializar base de datos
@@ -61,7 +104,9 @@ initializeDatabase().catch(console.error);
 app.get('/api/app-config', (req, res) => {
     res.json({
         appName: "MUNDO PATAS",
-        version: "2.0.0",
+        version: "2.1.0-licencias",
+        build: "51bfe88",
+        licenseSystemEnabled: true,
         environment: process.env.NODE_ENV || "development",
         mode: "production",
         features: {
@@ -91,7 +136,7 @@ app.post('/api/auth/register', async (req, res) => {
 
         // Insertar nuevo veterinario
         const result = await pool.query(
-            'INSERT INTO veterinarios (nombre_veterinaria, nombre_veterinario, email, password, telefono, direccion) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, nombre_veterinario',
+            'INSERT INTO veterinarios (nombre_veterinaria, nombre_veterinario, email, password, telefono, direccion) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
             [nombre_veterinaria, nombre_veterinario, email, hashedPassword, telefono, direccion]
         );
 
@@ -104,7 +149,13 @@ app.post('/api/auth/register', async (req, res) => {
             user: {
                 id: user.id,
                 email: user.email,
-                nombre: user.nombre_veterinario
+                nombre: user.nombre_veterinario,
+                nombre_veterinario: user.nombre_veterinario,
+                nombre_veterinaria: user.nombre_veterinaria,
+                telefono: user.telefono,
+                direccion: user.direccion,
+                tipo_cuenta: user.tipo_cuenta,
+                licencia_activa: user.licencia_activa
             }
         });
     } catch (error) {
@@ -138,7 +189,13 @@ app.post('/api/login', async (req, res) => {
             user: {
                 id: user.id,
                 email: user.email,
-                nombre: user.nombre_veterinario
+                nombre: user.nombre_veterinario,
+                nombre_veterinario: user.nombre_veterinario,
+                nombre_veterinaria: user.nombre_veterinaria,
+                telefono: user.telefono,
+                direccion: user.direccion,
+                tipo_cuenta: user.tipo_cuenta,
+                licencia_activa: user.licencia_activa
             }
         });
     } catch (error) {
@@ -221,82 +278,282 @@ app.get('/api/mascotas', authenticateToken, async (req, res) => {
 });
 
 // RUTAS DE CONSULTAS
-app.post('/api/consultas', authenticateToken, async (req, res) => {
-    const { 
-        mascota_id, motivo, observaciones,
-        // Semiología y examen físico
-        estado_corporal, manto_piloso, tiempo_llenado_capilar,
-        frecuencia_cardiaca, frecuencia_respiratoria, peso, temperatura,
-        ganglios_linfaticos, tonalidad_mucosa, examen_bucal, examen_ocular,
-        examen_otico, examen_neurologico, examen_aparato_locomotor,
-        // Estudios complementarios
-        tipo_analisis, fecha_analisis, resultados_analisis, archivo_analisis_url,
-        electrocardiograma, medicion_presion_arterial, ecocardiograma,
-        // Desparasitación
-        desparasitacion, fecha_desparasitacion, producto_desparasitacion,
-        // Diagnóstico
-        diagnostico_presuntivo, diagnostico_final,
-        // Tratamiento
-        medicamento, dosis, intervalo, tratamiento_inyectable
-    } = req.body;
 
+// Obtener todas las consultas del veterinario autenticado
+app.get('/api/consultas', authenticateToken, async (req, res) => {
+    console.log(`📋 Obteniendo consultas para el veterinario ID: ${req.user.id}`);
+    
     try {
+        const result = await pool.query(`
+            SELECT c.*, 
+                   m.nombre as nombre_mascota, m.especie,
+                   cl.nombre as nombre_cliente, cl.apellido as apellido_cliente
+            FROM consultas c
+            JOIN mascotas m ON c.mascota_id = m.id
+            JOIN clientes cl ON c.cliente_id = cl.id
+            WHERE c.veterinario_id = $1
+            ORDER BY c.fecha_consulta DESC
+            LIMIT 100
+        `, [req.user.id]);
+        
+        console.log(`✅ Se encontraron ${result.rows.length} consultas`);
+        
+        res.json({
+            success: true,
+            count: result.rows.length,
+            consultas: result.rows
+        });
+        
+    } catch (error) {
+        console.error('❌ Error al obtener consultas:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error al obtener las consultas',
+            message: 'Ocurrió un error al intentar recuperar las consultas',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});
+// Middleware de autenticación para desarrollo/pruebas
+const devAuth = (req, res, next) => {
+    // En desarrollo, permitir acceso sin autenticación
+    if (process.env.NODE_ENV !== 'production') {
+        console.log('🔧 Modo desarrollo: Acceso permitido sin autenticación');
+        // Crear un usuario de prueba
+        req.user = { 
+            id: 1, 
+            email: 'desarrollo@ejemplo.com',
+            role: 'admin',
+            isDemo: true,
+            nombre: 'Usuario de Prueba',
+            apellido: 'Desarrollo'
+        };
+        return next();
+    }
+    
+    // En producción, usar autenticación normal
+    console.log('🔐 Modo producción: Verificando autenticación');
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        console.error('❌ No se proporcionó token de autenticación');
+        return res.status(401).json({
+            success: false,
+            error: 'Token de acceso requerido',
+            message: 'Debes iniciar sesión para acceder a este recurso',
+            requiresAuth: true
+        });
+    }
+    
+    // Verificar el token JWT
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            console.error('❌ Error al verificar el token:', err.message);
+            return res.status(403).json({
+                success: false,
+                error: 'Token inválido o expirado',
+                message: 'La sesión ha expirado o el token no es válido',
+                requiresAuth: true
+            });
+        }
+        
+        // Token válido, establecer el usuario en la solicitud
+        req.user = user;
+        console.log(`🔑 Usuario autenticado: ${user.email || 'ID: ' + user.id}`);
+        next();
+    });
+};
+
+// Middleware de autenticación específico para consultas
+const authConsulta = (req, res, next) => {
+    try {
+        // En desarrollo, usar autenticación simulada
+        if (process.env.NODE_ENV !== 'production') {
+            req.user = { 
+                id: 1, 
+                email: 'consulta@ejemplo.com',
+                role: 'admin',
+                nombre: 'Usuario',
+                apellido: 'Consulta'
+            };
+            console.log('🔧 Modo desarrollo: Usuario simulado para consulta');
+            return next();
+        }
+
+        // En producción, verificar token
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1];
+        
+        if (!token) {
+            console.error('❌ No se proporcionó token de autenticación para consulta');
+            return res.status(401).json({
+                success: false,
+                error: 'Token de acceso requerido',
+                message: 'Debes iniciar sesión para acceder a este recurso',
+                requiresAuth: true
+            });
+        }
+
+        // Verificar token JWT
+        jwt.verify(token, JWT_SECRET, (err, user) => {
+            if (err) {
+                console.error('❌ Error al verificar el token de consulta:', err.message);
+                return res.status(401).json({
+                    success: false,
+                    error: 'Sesión expirada',
+                    message: 'Tu sesión ha expirado, por favor inicia sesión nuevamente',
+                    requiresAuth: true
+                });
+            }
+            
+            // Token válido
+            req.user = user;
+            console.log(`🔑 Consulta - Usuario autenticado: ${user.email || 'ID: ' + user.id}`);
+            next();
+        });
+    } catch (error) {
+        console.error('❌ Error en middleware de autenticación de consulta:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Error de autenticación',
+            message: 'Ocurrió un error al verificar la autenticación'
+        });
+    }
+};
+
+// Endpoint para crear una nueva consulta
+app.post('/api/consultas', authConsulta, async (req, res) => {
+    try {
+        console.log('📝 Datos recibidos para nueva consulta:', req.body);
+        console.log('👤 Usuario autenticado:', req.user);
+        
+        // Validar campos obligatorios
+        const { mascota_id, motivo, observaciones = '' } = req.body;
+        
+        if (!mascota_id) {
+            console.error('❌ Error: mascota_id es obligatorio');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Datos incompletos',
+                message: 'El ID de la mascota es obligatorio' 
+            });
+        }
+        
+        if (!motivo) {
+            console.error('❌ Error: motivo es obligatorio');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Datos incompletos',
+                message: 'El motivo de la consulta es obligatorio' 
+            });
+        }
+        
+        // Desestructurar el resto de los campos con valores por defecto
+        const { 
+            // Semiología y examen físico
+            estado_corporal = null, manto_piloso = null, tiempo_llenado_capilar = null,
+            frecuencia_cardiaca = null, frecuencia_respiratoria = null, peso = null, 
+            temperatura = null, ganglios_linfaticos = null, tonalidad_mucosa = null, 
+            examen_bucal = null, examen_ocular = null, examen_otico = null, 
+            examen_neurologico = null, examen_aparato_locomotor = null,
+            // Estudios complementarios
+            tipo_analisis = null, fecha_analisis = null, resultados_analisis = null, 
+            archivo_analisis_url = null, electrocardiograma = null, 
+            medicion_presion_arterial = null, ecocardiograma = null,
+            // Desparasitación
+            desparasitacion = null, fecha_desparasitacion = null, 
+            producto_desparasitacion = null, proxima_desparasitacion = null,
+            // Diagnóstico
+            diagnostico_presuntivo = null, diagnostico_final = null,
+            // Tratamiento
+            medicamento = null, dosis = null, intervalo = null, tratamiento_inyectable = null
+        } = req.body;
+
+        console.log(`🔍 Verificando mascota ID: ${mascota_id} para el veterinario ID: ${req.user.id}`);
+        
         // Verificar que la mascota pertenece al veterinario
         const mascotaCheck = await pool.query(`
-            SELECT m.id, m.cliente_id 
+            SELECT m.id, m.cliente_id, m.nombre as nombre_mascota, 
+                   c.nombre as nombre_cliente, c.apellido as apellido_cliente
             FROM mascotas m 
             JOIN clientes c ON m.cliente_id = c.id 
             WHERE m.id = $1 AND c.veterinario_id = $2
         `, [mascota_id, req.user.id]);
         
+        console.log(`🔎 Resultado de la búsqueda de mascota:`, mascotaCheck.rows[0] || 'No encontrada');
+        
         if (mascotaCheck.rows.length === 0) {
-            return res.status(403).json({ error: 'No tienes permiso para agregar consultas a esta mascota' });
+            console.error(`❌ Error: La mascota con ID ${mascota_id} no existe o no pertenece al veterinario`);
+            return res.status(403).json({ 
+                success: false,
+                error: 'No autorizado',
+                message: 'No tienes permiso para agregar consultas a esta mascota',
+                details: 'La mascota no existe o no pertenece a tu lista de pacientes'
+            });
         }
 
-        const cliente_id = mascotaCheck.rows[0].cliente_id;
-
+        const clienteInfo = mascotaCheck.rows[0];
+        const cliente_id = clienteInfo.cliente_id;
+        
+        console.log(`📝 Intentando registrar consulta para mascota: ${clienteInfo.nombre_mascota} (ID: ${mascota_id})`);
+        
         const result = await pool.query(
             `INSERT INTO consultas (
-                veterinario_id, cliente_id, mascota_id, motivo,
-                estado_corporal, manto_piloso, tiempo_llenado_capilar,
-                frecuencia_cardiaca, frecuencia_respiratoria, peso, temperatura,
-                ganglios_linfaticos, tonalidad_mucosa, examen_bucal, examen_ocular,
-                examen_otico, examen_neurologico, examen_aparato_locomotor,
-                tipo_analisis, fecha_analisis, resultados_analisis, archivo_analisis_url,
-                electrocardiograma, medicion_presion_arterial, ecocardiograma,
-                desparasitacion, fecha_desparasitacion, producto_desparasitacion,
-                diagnostico_presuntivo, diagnostico_final,
-                medicamento, dosis, intervalo, tratamiento_inyectable,
-                observaciones
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-                $29, $30, $31, $32, $33, $34, $35
-            ) RETURNING *`,
-            [
-                req.user.id, cliente_id, mascota_id, motivo,
-                estado_corporal, manto_piloso, tiempo_llenado_capilar,
-                frecuencia_cardiaca, frecuencia_respiratoria, peso, temperatura,
-                ganglios_linfaticos, tonalidad_mucosa, examen_bucal, examen_ocular,
-                examen_otico, examen_neurologico, examen_aparato_locomotor,
-                tipo_analisis, fecha_analisis, resultados_analisis, archivo_analisis_url,
-                electrocardiograma, medicion_presion_arterial, ecocardiograma,
-                desparasitacion, fecha_desparasitacion, producto_desparasitacion,
-                diagnostico_presuntivo, diagnostico_final,
-                medicamento, dosis, intervalo, tratamiento_inyectable,
-                observaciones
-            ]
+                veterinario_id, cliente_id, mascota_id, motivo, observaciones, fecha_consulta
+            ) VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
+            [req.user.id, cliente_id, mascota_id, motivo, observaciones]
         );
-
-        res.json({ message: 'Consulta registrada exitosamente', consulta: result.rows[0] });
+        
+        console.log('✅ Consulta registrada exitosamente:', result.rows[0]);
+        
+        // Enviar respuesta exitosa con más detalles
+        res.status(201).json({ 
+            success: true,
+            message: 'Consulta registrada exitosamente',
+            consulta: result.rows[0],
+            mascota: {
+                id: mascota_id,
+                nombre: clienteInfo.nombre_mascota
+            },
+            cliente: {
+                id: cliente_id,
+                nombre: clienteInfo.nombre_cliente,
+                apellido: clienteInfo.apellido_cliente
+            }
+        });
+        
     } catch (error) {
-        console.error('Error registrando consulta:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
+        console.error('❌ Error en la creación de consulta:', error);
+        
+        // Manejar diferentes tipos de errores
+        if (error.code === '23503') { // Violación de clave foránea
+            return res.status(400).json({
+                success: false,
+                error: 'Error de referencia',
+                message: 'Uno o más IDs proporcionados no existen en la base de datos',
+                details: error.detail,
+                code: error.code
+            });
+        }
+        
+        // Para otros errores de base de datos
+        res.status(500).json({
+            success: false,
+            error: 'Error interno del servidor',
+            message: 'Ocurrió un error al procesar la solicitud',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            code: error.code
+        });
     }
 });
 
-app.get('/api/consultas/:mascotaId', authenticateToken, async (req, res) => {
+app.get('/api/consultas/:mascotaId', devAuth, async (req, res) => {
     try {
+        console.log(`🔍 Obteniendo consultas para mascota ID: ${req.params.mascotaId}`);
+        console.log('👤 Usuario autenticado:', req.user);
+        
         // Verificar permisos
         const mascotaCheck = await pool.query(`
             SELECT m.id 
@@ -330,7 +587,7 @@ app.put('/api/consultas/:id', authenticateToken, async (req, res) => {
         tipo_analisis, fecha_analisis, resultados_analisis, archivo_analisis_url,
         electrocardiograma, medicion_presion_arterial, ecocardiograma,
         // Desparasitación
-        desparasitacion, fecha_desparasitacion, producto_desparasitacion,
+        desparasitacion, fecha_desparasitacion, producto_desparasitacion, proxima_desparasitacion,
         // Diagnóstico
         diagnostico_presuntivo, diagnostico_final,
         // Tratamiento
@@ -358,11 +615,11 @@ app.put('/api/consultas/:id', authenticateToken, async (req, res) => {
                 examen_otico = $13, examen_neurologico = $14, examen_aparato_locomotor = $15,
                 tipo_analisis = $16, fecha_analisis = $17, resultados_analisis = $18, archivo_analisis_url = $19,
                 electrocardiograma = $20, medicion_presion_arterial = $21, ecocardiograma = $22,
-                desparasitacion = $23, fecha_desparasitacion = $24, producto_desparasitacion = $25,
-                diagnostico_presuntivo = $26, diagnostico_final = $27,
-                medicamento = $28, dosis = $29, intervalo = $30, tratamiento_inyectable = $31,
-                observaciones = $32
-            WHERE id = $33
+                desparasitacion = $23, fecha_desparasitacion = $24, producto_desparasitacion = $25, proxima_desparasitacion = $26,
+                diagnostico_presuntivo = $27, diagnostico_final = $28,
+                medicamento = $29, dosis = $30, intervalo = $31, tratamiento_inyectable = $32,
+                observaciones = $33
+            WHERE id = $34
             RETURNING *`,
             [
                 motivo,
@@ -372,7 +629,7 @@ app.put('/api/consultas/:id', authenticateToken, async (req, res) => {
                 examen_otico, examen_neurologico, examen_aparato_locomotor,
                 tipo_analisis, fecha_analisis, resultados_analisis, archivo_analisis_url,
                 electrocardiograma, medicion_presion_arterial, ecocardiograma,
-                desparasitacion, fecha_desparasitacion, producto_desparasitacion,
+                desparasitacion, fecha_desparasitacion, producto_desparasitacion, proxima_desparasitacion,
                 diagnostico_presuntivo, diagnostico_final,
                 medicamento, dosis, intervalo, tratamiento_inyectable,
                 observaciones,
@@ -437,6 +694,769 @@ app.get('/api/analisis/:mascotaId', authenticateToken, async (req, res) => {
         res.json(result.rows);
     } catch (error) {
         console.error('Error obteniendo análisis:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== ENDPOINT PÚBLICO PARA AGENDAR CITAS (CLIENTES) ====================
+
+// Crear cita pública (sin autenticación - para clientes)
+app.post('/api/citas/publica', async (req, res) => {
+    const { 
+        veterinario_id, cliente_nombre, cliente_email, cliente_telefono,
+        mascota_nombre, mascota_especie, fecha_cita, hora_cita,
+        motivo, metodo_pago, monto
+    } = req.body;
+    
+    try {
+        // Verificar que el veterinario existe
+        const vetCheck = await pool.query('SELECT id FROM veterinarios WHERE id = $1', [veterinario_id]);
+        if (vetCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Veterinario no encontrado' });
+        }
+
+        // Buscar o crear cliente
+        let cliente = await pool.query(
+            'SELECT id FROM clientes WHERE email = $1 AND veterinario_id = $2',
+            [cliente_email, veterinario_id]
+        );
+
+        let cliente_id;
+        if (cliente.rows.length === 0) {
+            // Crear nuevo cliente
+            const nombres = cliente_nombre.split(' ');
+            const nombre = nombres[0];
+            const apellido = nombres.slice(1).join(' ') || '';
+            
+            const nuevoCliente = await pool.query(
+                'INSERT INTO clientes (veterinario_id, nombre, apellido, email, telefono) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [veterinario_id, nombre, apellido, cliente_email, cliente_telefono]
+            );
+            cliente_id = nuevoCliente.rows[0].id;
+        } else {
+            cliente_id = cliente.rows[0].id;
+        }
+
+        // Buscar o crear mascota
+        let mascota = await pool.query(
+            'SELECT id FROM mascotas WHERE nombre = $1 AND cliente_id = $2',
+            [mascota_nombre, cliente_id]
+        );
+
+        let mascota_id;
+        if (mascota.rows.length === 0) {
+            // Crear nueva mascota
+            const nuevaMascota = await pool.query(
+                'INSERT INTO mascotas (veterinario_id, cliente_id, nombre, especie) VALUES ($1, $2, $3, $4) RETURNING id',
+                [veterinario_id, cliente_id, mascota_nombre, mascota_especie]
+            );
+            mascota_id = nuevaMascota.rows[0].id;
+        } else {
+            mascota_id = mascota.rows[0].id;
+        }
+
+        // Crear la cita
+        const fecha_cita_completa = `${fecha_cita}T${hora_cita}:00`;
+        const pago_confirmado = metodo_pago !== 'efectivo';
+        
+        const result = await pool.query(
+            `INSERT INTO citas (veterinario_id, cliente_id, mascota_id, fecha_cita, motivo, estado, monto, metodo_pago, pago_confirmado) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            [veterinario_id, cliente_id, mascota_id, fecha_cita_completa, motivo, 'programada', monto, metodo_pago, pago_confirmado]
+        );
+
+        res.json({ 
+            message: 'Cita agendada exitosamente', 
+            cita: result.rows[0],
+            cliente_id,
+            mascota_id
+        });
+    } catch (error) {
+        console.error('Error creando cita pública:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// RUTAS DE CITAS (VETERINARIO)
+app.post('/api/citas', authenticateToken, async (req, res) => {
+    const { cliente_id, mascota_id, fecha_cita, motivo, observaciones, monto, metodo_pago } = req.body;
+    
+    try {
+        // Verificar permisos
+        const clienteCheck = await pool.query(`
+            SELECT id FROM clientes WHERE id = $1 AND veterinario_id = $2
+        `, [cliente_id, req.user.id]);
+        
+        if (clienteCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'No tienes permiso para crear citas para este cliente' });
+        }
+
+        const result = await pool.query(
+            `INSERT INTO citas (veterinario_id, cliente_id, mascota_id, fecha_cita, motivo, observaciones, monto, metodo_pago, estado) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            [req.user.id, cliente_id, mascota_id, fecha_cita, motivo, observaciones, monto || 0, metodo_pago || 'efectivo', 'programada']
+        );
+
+        res.json({ message: 'Cita creada exitosamente', cita: result.rows[0] });
+    } catch (error) {
+        console.error('Error creando cita:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+app.get('/api/citas', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT c.*, 
+                   cl.nombre as cliente_nombre, cl.apellido as cliente_apellido,
+                   m.nombre as mascota_nombre, m.especie
+            FROM citas c
+            JOIN clientes cl ON c.cliente_id = cl.id
+            LEFT JOIN mascotas m ON c.mascota_id = m.id
+            WHERE c.veterinario_id = $1
+            ORDER BY c.fecha_cita DESC
+        `, [req.user.id]);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo citas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+app.put('/api/citas/:id', authenticateToken, async (req, res) => {
+    const { estado, observaciones, pago_confirmado } = req.body;
+    
+    try {
+        // Verificar permisos
+        const citaCheck = await pool.query(`
+            SELECT id FROM citas WHERE id = $1 AND veterinario_id = $2
+        `, [req.params.id, req.user.id]);
+        
+        if (citaCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'No tienes permiso para modificar esta cita' });
+        }
+
+        const result = await pool.query(
+            `UPDATE citas SET estado = $1, observaciones = $2, pago_confirmado = $3 WHERE id = $4 RETURNING *`,
+            [estado, observaciones, pago_confirmado, req.params.id]
+        );
+
+        res.json({ message: 'Cita actualizada exitosamente', cita: result.rows[0] });
+    } catch (error) {
+        console.error('Error actualizando cita:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+app.delete('/api/citas/:id', authenticateToken, async (req, res) => {
+    try {
+        // Verificar permisos
+        const citaCheck = await pool.query(`
+            SELECT id FROM citas WHERE id = $1 AND veterinario_id = $2
+        `, [req.params.id, req.user.id]);
+        
+        if (citaCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'No tienes permiso para eliminar esta cita' });
+        }
+
+        await pool.query('DELETE FROM citas WHERE id = $1', [req.params.id]);
+        res.json({ message: 'Cita eliminada exitosamente' });
+    } catch (error) {
+        console.error('Error eliminando cita:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ENDPOINT PARA PROCESAR PAGO DE CITA (Mercado Pago)
+app.post('/api/citas/:id/pago', authenticateToken, async (req, res) => {
+    const { payment_id, status, payment_method } = req.body;
+    
+    try {
+        // Verificar permisos
+        const citaCheck = await pool.query(`
+            SELECT id, monto FROM citas WHERE id = $1 AND veterinario_id = $2
+        `, [req.params.id, req.user.id]);
+        
+        if (citaCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Cita no encontrada' });
+        }
+
+        // Actualizar estado de pago
+        const result = await pool.query(
+            `UPDATE citas SET 
+                pago_confirmado = $1, 
+                payment_id = $2, 
+                metodo_pago = $3,
+                fecha_pago = CURRENT_TIMESTAMP
+             WHERE id = $4 RETURNING *`,
+            [status === 'approved', payment_id, payment_method, req.params.id]
+        );
+
+        res.json({ message: 'Pago procesado exitosamente', cita: result.rows[0] });
+    } catch (error) {
+        console.error('Error procesando pago:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== ENDPOINTS DE FACTURACIÓN ====================
+
+// Crear factura
+app.post('/api/facturas', authenticateToken, async (req, res) => {
+    const { cliente_id, items, subtotal, impuestos, total, fecha_factura } = req.body;
+    
+    try {
+        // Verificar que el cliente pertenece al veterinario
+        const clienteCheck = await pool.query(
+            'SELECT id FROM clientes WHERE id = $1 AND veterinario_id = $2',
+            [cliente_id, req.user.id]
+        );
+        
+        if (clienteCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Cliente no encontrado' });
+        }
+
+        // Generar número de factura único
+        const yearMonth = new Date().toISOString().slice(0, 7).replace('-', '');
+        const countResult = await pool.query(
+            'SELECT COUNT(*) as count FROM facturas WHERE veterinario_id = $1 AND numero_factura LIKE $2',
+            [req.user.id, `${yearMonth}%`]
+        );
+        const count = parseInt(countResult.rows[0].count) + 1;
+        const numero_factura = `${yearMonth}-${String(count).padStart(4, '0')}`;
+
+        // Insertar factura
+        const facturaResult = await pool.query(
+            `INSERT INTO facturas (veterinario_id, cliente_id, numero_factura, fecha_factura, subtotal, impuestos, total, estado)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pendiente') RETURNING *`,
+            [req.user.id, cliente_id, numero_factura, fecha_factura || new Date(), subtotal, impuestos || 0, total]
+        );
+
+        const factura = facturaResult.rows[0];
+
+        // Insertar items de la factura
+        for (const item of items) {
+            await pool.query(
+                `INSERT INTO factura_items (factura_id, descripcion, cantidad, precio_unitario, subtotal)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [factura.id, item.descripcion, item.cantidad, item.precio_unitario, item.subtotal]
+            );
+        }
+
+        // Obtener factura completa con items
+        const facturaCompleta = await pool.query(
+            `SELECT f.*, 
+                    c.nombre as cliente_nombre, 
+                    c.apellido as cliente_apellido,
+                    c.email as cliente_email,
+                    c.telefono as cliente_telefono,
+                    json_agg(json_build_object(
+                        'id', fi.id,
+                        'descripcion', fi.descripcion,
+                        'cantidad', fi.cantidad,
+                        'precio_unitario', fi.precio_unitario,
+                        'subtotal', fi.subtotal
+                    )) as items
+             FROM facturas f
+             JOIN clientes c ON f.cliente_id = c.id
+             LEFT JOIN factura_items fi ON f.id = fi.factura_id
+             WHERE f.id = $1
+             GROUP BY f.id, c.nombre, c.apellido, c.email, c.telefono`,
+            [factura.id]
+        );
+
+        res.json({ message: 'Factura creada exitosamente', factura: facturaCompleta.rows[0] });
+    } catch (error) {
+        console.error('Error creando factura:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener todas las facturas
+app.get('/api/facturas', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT f.*, 
+                    c.nombre as cliente_nombre, 
+                    c.apellido as cliente_apellido,
+                    c.email as cliente_email,
+                    c.telefono as cliente_telefono
+             FROM facturas f
+             JOIN clientes c ON f.cliente_id = c.id
+             WHERE f.veterinario_id = $1
+             ORDER BY f.fecha_factura DESC, f.created_at DESC`,
+            [req.user.id]
+        );
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo facturas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener factura por ID con items
+app.get('/api/facturas/:id', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT f.*, 
+                    c.nombre as cliente_nombre, 
+                    c.apellido as cliente_apellido,
+                    c.email as cliente_email,
+                    c.telefono as cliente_telefono,
+                    c.direccion as cliente_direccion,
+                    json_agg(json_build_object(
+                        'id', fi.id,
+                        'descripcion', fi.descripcion,
+                        'cantidad', fi.cantidad,
+                        'precio_unitario', fi.precio_unitario,
+                        'subtotal', fi.subtotal
+                    )) as items
+             FROM facturas f
+             JOIN clientes c ON f.cliente_id = c.id
+             LEFT JOIN factura_items fi ON f.id = fi.factura_id
+             WHERE f.id = $1 AND f.veterinario_id = $2
+             GROUP BY f.id, c.nombre, c.apellido, c.email, c.telefono, c.direccion`,
+            [req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Factura no encontrada' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error obteniendo factura:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar estado de factura
+app.put('/api/facturas/:id', authenticateToken, async (req, res) => {
+    const { estado } = req.body;
+    
+    try {
+        // Verificar permisos
+        const facturaCheck = await pool.query(
+            'SELECT id FROM facturas WHERE id = $1 AND veterinario_id = $2',
+            [req.params.id, req.user.id]
+        );
+        
+        if (facturaCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Factura no encontrada' });
+        }
+
+        const result = await pool.query(
+            'UPDATE facturas SET estado = $1 WHERE id = $2 RETURNING *',
+            [estado, req.params.id]
+        );
+
+        res.json({ message: 'Factura actualizada exitosamente', factura: result.rows[0] });
+    } catch (error) {
+        console.error('Error actualizando factura:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Eliminar factura
+app.delete('/api/facturas/:id', authenticateToken, async (req, res) => {
+    try {
+        // Verificar permisos
+        const facturaCheck = await pool.query(
+            'SELECT id FROM facturas WHERE id = $1 AND veterinario_id = $2',
+            [req.params.id, req.user.id]
+        );
+        
+        if (facturaCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Factura no encontrada' });
+        }
+
+        // Eliminar items primero
+        await pool.query('DELETE FROM factura_items WHERE factura_id = $1', [req.params.id]);
+        
+        // Eliminar factura
+        await pool.query('DELETE FROM facturas WHERE id = $1', [req.params.id]);
+
+        res.json({ message: 'Factura eliminada exitosamente' });
+    } catch (error) {
+        console.error('Error eliminando factura:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== INTEGRACIÓN CON ARCA/AFIP ====================
+
+// Sincronizar factura con ARCA
+app.post('/api/facturas/:id/sincronizar-arca', authenticateToken, async (req, res) => {
+    const { cae, cae_vencimiento, tipo_comprobante, numero_comprobante } = req.body;
+    
+    try {
+        // Verificar permisos
+        const facturaCheck = await pool.query(
+            'SELECT id FROM facturas WHERE id = $1 AND veterinario_id = $2',
+            [req.params.id, req.user.id]
+        );
+        
+        if (facturaCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Factura no encontrada' });
+        }
+
+        // Obtener configuración ARCA del veterinario
+        const vetConfig = await pool.query(
+            'SELECT arca_punto_venta FROM veterinarios WHERE id = $1',
+            [req.user.id]
+        );
+
+        const result = await pool.query(
+            `UPDATE facturas SET 
+                arca_cae = $1,
+                arca_cae_vencimiento = $2,
+                arca_tipo_comprobante = $3,
+                arca_punto_venta = $4,
+                arca_numero_comprobante = $5,
+                arca_sincronizada = true
+             WHERE id = $6 RETURNING *`,
+            [cae, cae_vencimiento, tipo_comprobante, vetConfig.rows[0].arca_punto_venta, numero_comprobante, req.params.id]
+        );
+
+        res.json({ 
+            message: 'Factura sincronizada con ARCA exitosamente', 
+            factura: result.rows[0] 
+        });
+    } catch (error) {
+        console.error('Error sincronizando con ARCA:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Registrar factura manual desde ARCA
+app.post('/api/facturas/desde-arca', authenticateToken, async (req, res) => {
+    const { 
+        cliente_id, numero_factura, fecha_factura, items, 
+        subtotal, impuestos, total,
+        cae, cae_vencimiento, tipo_comprobante, numero_comprobante
+    } = req.body;
+    
+    try {
+        // Verificar que el cliente pertenece al veterinario
+        const clienteCheck = await pool.query(
+            'SELECT id FROM clientes WHERE id = $1 AND veterinario_id = $2',
+            [cliente_id, req.user.id]
+        );
+        
+        if (clienteCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Cliente no encontrado' });
+        }
+
+        // Obtener configuración ARCA
+        const vetConfig = await pool.query(
+            'SELECT arca_punto_venta FROM veterinarios WHERE id = $1',
+            [req.user.id]
+        );
+
+        // Insertar factura con datos de ARCA
+        const facturaResult = await pool.query(
+            `INSERT INTO facturas (
+                veterinario_id, cliente_id, numero_factura, fecha_factura, 
+                subtotal, impuestos, total, estado,
+                arca_cae, arca_cae_vencimiento, arca_tipo_comprobante,
+                arca_punto_venta, arca_numero_comprobante, arca_sincronizada
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pagada', $8, $9, $10, $11, $12, true) 
+            RETURNING *`,
+            [
+                req.user.id, cliente_id, numero_factura, fecha_factura || new Date(),
+                subtotal, impuestos || 0, total,
+                cae, cae_vencimiento, tipo_comprobante,
+                vetConfig.rows[0].arca_punto_venta, numero_comprobante
+            ]
+        );
+
+        const factura = facturaResult.rows[0];
+
+        // Insertar items de la factura
+        for (const item of items) {
+            await pool.query(
+                `INSERT INTO factura_items (factura_id, descripcion, cantidad, precio_unitario, subtotal)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [factura.id, item.descripcion, item.cantidad, item.precio_unitario, item.subtotal]
+            );
+        }
+
+        res.json({ 
+            message: 'Factura registrada desde ARCA exitosamente', 
+            factura 
+        });
+    } catch (error) {
+        console.error('Error registrando factura desde ARCA:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener facturas sincronizadas con ARCA
+app.get('/api/facturas/arca/sincronizadas', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT f.*, 
+                    c.nombre as cliente_nombre, 
+                    c.apellido as cliente_apellido,
+                    c.email as cliente_email
+             FROM facturas f
+             JOIN clientes c ON f.cliente_id = c.id
+             WHERE f.veterinario_id = $1 AND f.arca_sincronizada = true
+             ORDER BY f.fecha_factura DESC, f.created_at DESC`,
+            [req.user.id]
+        );
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo facturas ARCA:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener estadísticas de facturación
+app.get('/api/facturas/stats/resumen', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT 
+                COUNT(*) as total_facturas,
+                SUM(CASE WHEN estado = 'pendiente' THEN 1 ELSE 0 END) as pendientes,
+                SUM(CASE WHEN estado = 'pagada' THEN 1 ELSE 0 END) as pagadas,
+                SUM(CASE WHEN estado = 'cancelada' THEN 1 ELSE 0 END) as canceladas,
+                COALESCE(SUM(CASE WHEN estado = 'pagada' THEN total ELSE 0 END), 0) as total_ingresado,
+                COALESCE(SUM(CASE WHEN estado = 'pendiente' THEN total ELSE 0 END), 0) as total_pendiente
+             FROM facturas
+             WHERE veterinario_id = $1`,
+            [req.user.id]
+        );
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error obteniendo estadísticas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== ENDPOINTS DE INVENTARIO ====================
+
+// Obtener todos los productos del inventario
+app.get('/api/inventario/productos', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM inventario_productos WHERE veterinario_id = $1 ORDER BY nombre ASC',
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo productos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Agregar producto al inventario
+app.post('/api/inventario/productos', authenticateToken, async (req, res) => {
+    const {
+        codigo_barras, nombre, descripcion, categoria, tipo, marca, presentacion,
+        stock_actual, stock_minimo, stock_maximo, precio_compra, precio_venta,
+        fecha_vencimiento, lote, proveedor, ubicacion, imagen_url
+    } = req.body;
+
+    try {
+        const result = await pool.query(`
+            INSERT INTO inventario_productos (
+                veterinario_id, codigo_barras, nombre, descripcion, categoria, tipo,
+                marca, presentacion, stock_actual, stock_minimo, stock_maximo,
+                precio_compra, precio_venta, fecha_vencimiento, lote, proveedor,
+                ubicacion, imagen_url
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            RETURNING *
+        `, [
+            req.user.id, codigo_barras, nombre, descripcion, categoria, tipo,
+            marca, presentacion, stock_actual, stock_minimo, stock_maximo,
+            precio_compra, precio_venta, fecha_vencimiento, lote, proveedor,
+            ubicacion, imagen_url
+        ]);
+
+        // Registrar movimiento inicial
+        await pool.query(`
+            INSERT INTO movimientos_inventario (
+                producto_id, veterinario_id, tipo_movimiento, cantidad, motivo,
+                stock_anterior, stock_nuevo
+            ) VALUES ($1, $2, 'entrada', $3, 'Stock inicial', 0, $3)
+        `, [result.rows[0].id, req.user.id, stock_actual]);
+
+        res.json({ message: 'Producto agregado exitosamente', producto: result.rows[0] });
+    } catch (error) {
+        console.error('Error agregando producto:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar producto
+app.put('/api/inventario/productos/:id', authenticateToken, async (req, res) => {
+    const {
+        codigo_barras, nombre, descripcion, categoria, tipo, marca, presentacion,
+        stock_minimo, stock_maximo, precio_compra, precio_venta,
+        fecha_vencimiento, lote, proveedor, ubicacion, imagen_url, activo
+    } = req.body;
+
+    try {
+        const result = await pool.query(`
+            UPDATE inventario_productos SET
+                codigo_barras = $1, nombre = $2, descripcion = $3, categoria = $4,
+                tipo = $5, marca = $6, presentacion = $7, stock_minimo = $8,
+                stock_maximo = $9, precio_compra = $10, precio_venta = $11,
+                fecha_vencimiento = $12, lote = $13, proveedor = $14, ubicacion = $15,
+                imagen_url = $16, activo = $17, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $18 AND veterinario_id = $19
+            RETURNING *
+        `, [
+            codigo_barras, nombre, descripcion, categoria, tipo, marca, presentacion,
+            stock_minimo, stock_maximo, precio_compra, precio_venta,
+            fecha_vencimiento, lote, proveedor, ubicacion, imagen_url, activo,
+            req.params.id, req.user.id
+        ]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Producto no encontrado' });
+        }
+
+        res.json({ message: 'Producto actualizado exitosamente', producto: result.rows[0] });
+    } catch (error) {
+        console.error('Error actualizando producto:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Ajustar stock de producto
+app.post('/api/inventario/productos/:id/ajustar-stock', authenticateToken, async (req, res) => {
+    const { cantidad, tipo_movimiento, motivo } = req.body;
+
+    try {
+        // Obtener stock actual
+        const productoResult = await pool.query(
+            'SELECT stock_actual FROM inventario_productos WHERE id = $1 AND veterinario_id = $2',
+            [req.params.id, req.user.id]
+        );
+
+        if (productoResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Producto no encontrado' });
+        }
+
+        const stockAnterior = productoResult.rows[0].stock_actual;
+        let stockNuevo = stockAnterior;
+
+        // Calcular nuevo stock
+        if (tipo_movimiento === 'entrada') {
+            stockNuevo = stockAnterior + cantidad;
+        } else if (tipo_movimiento === 'salida') {
+            stockNuevo = stockAnterior - cantidad;
+            if (stockNuevo < 0) {
+                return res.status(400).json({ error: 'Stock insuficiente' });
+            }
+        }
+
+        // Actualizar stock
+        await pool.query(
+            'UPDATE inventario_productos SET stock_actual = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+            [stockNuevo, req.params.id]
+        );
+
+        // Registrar movimiento
+        await pool.query(`
+            INSERT INTO movimientos_inventario (
+                producto_id, veterinario_id, tipo_movimiento, cantidad, motivo,
+                stock_anterior, stock_nuevo
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [req.params.id, req.user.id, tipo_movimiento, cantidad, motivo, stockAnterior, stockNuevo]);
+
+        res.json({ 
+            message: 'Stock ajustado exitosamente',
+            stock_anterior: stockAnterior,
+            stock_nuevo: stockNuevo
+        });
+    } catch (error) {
+        console.error('Error ajustando stock:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener movimientos de inventario
+app.get('/api/inventario/movimientos', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT m.*, p.nombre as producto_nombre, p.codigo_barras
+            FROM movimientos_inventario m
+            JOIN inventario_productos p ON m.producto_id = p.id
+            WHERE m.veterinario_id = $1
+            ORDER BY m.fecha_movimiento DESC
+            LIMIT 100
+        `, [req.user.id]);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo movimientos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener alertas de stock bajo y productos por vencer
+app.get('/api/inventario/alertas', authenticateToken, async (req, res) => {
+    try {
+        const stockBajo = await pool.query(`
+            SELECT * FROM inventario_productos 
+            WHERE veterinario_id = $1 
+            AND stock_actual <= stock_minimo 
+            AND activo = true
+            ORDER BY stock_actual ASC
+        `, [req.user.id]);
+
+        const porVencer = await pool.query(`
+            SELECT * FROM inventario_productos 
+            WHERE veterinario_id = $1 
+            AND fecha_vencimiento IS NOT NULL
+            AND fecha_vencimiento <= CURRENT_DATE + INTERVAL '30 days'
+            AND fecha_vencimiento >= CURRENT_DATE
+            AND activo = true
+            ORDER BY fecha_vencimiento ASC
+        `, [req.user.id]);
+
+        const vencidos = await pool.query(`
+            SELECT * FROM inventario_productos 
+            WHERE veterinario_id = $1 
+            AND fecha_vencimiento IS NOT NULL
+            AND fecha_vencimiento < CURRENT_DATE
+            AND activo = true
+            ORDER BY fecha_vencimiento DESC
+        `, [req.user.id]);
+
+        res.json({
+            stock_bajo: stockBajo.rows,
+            por_vencer: porVencer.rows,
+            vencidos: vencidos.rows
+        });
+    } catch (error) {
+        console.error('Error obteniendo alertas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Buscar producto por código de barras
+app.get('/api/inventario/buscar/:codigo', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM inventario_productos WHERE codigo_barras = $1 AND veterinario_id = $2',
+            [req.params.codigo, req.user.id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Producto no encontrado' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error buscando producto:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -629,28 +1649,12 @@ app.get('/api/clientes-con-mascotas', authenticateToken, async (req, res) => {
 });
 
 // ENDPOINTS DE NOTIFICACIONES
-const { 
-    verificarAlimentoMascotas, 
-    calcularDiasRestantes,
-    obtenerConfiguracionNotificaciones,
-    actualizarConfiguracionNotificaciones
-} = require('./services/verificador-alimento');
-
-// Verificar alimento manualmente
-app.post('/api/notificaciones/verificar-alimento', authenticateToken, async (req, res) => {
-    try {
-        console.log('🔍 Verificación manual de alimento solicitada por:', req.user.email);
-        const resultado = await verificarAlimentoMascotas();
-        res.json(resultado);
-    } catch (error) {
-        console.error('Error en verificación manual:', error);
-        res.status(500).json({ error: 'Error al verificar alimento' });
-    }
-});
+// Nota: Las funciones se importan más abajo en la sección de notificaciones manuales
 
 // Obtener configuración de notificaciones
 app.get('/api/notificaciones/config', authenticateToken, async (req, res) => {
     try {
+        const { obtenerConfiguracionNotificaciones } = require('./services/verificador-alimento');
         const config = await obtenerConfiguracionNotificaciones(req.user.id);
         res.json(config);
     } catch (error) {
@@ -662,6 +1666,7 @@ app.get('/api/notificaciones/config', authenticateToken, async (req, res) => {
 // Actualizar configuración de notificaciones
 app.post('/api/notificaciones/config', authenticateToken, async (req, res) => {
     try {
+        const { actualizarConfiguracionNotificaciones } = require('./services/verificador-alimento');
         const config = await actualizarConfiguracionNotificaciones(req.user.id, req.body);
         res.json({ message: 'Configuración actualizada exitosamente', config });
     } catch (error) {
@@ -766,6 +1771,124 @@ app.get('/api/mascotas/:id/alimento-restante', authenticateToken, async (req, re
 // Servir archivos estáticos
 app.use('/uploads', express.static('uploads'));
 
+// ==================== CONFIGURACIÓN DE PAGOS DEL VETERINARIO ====================
+
+// Obtener perfil completo del veterinario
+app.get('/api/veterinario/perfil', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT id, nombre_veterinaria, nombre_veterinario, email, telefono, direccion,
+                   cbu_cvu, alias_cbu, titular_cuenta, mercadopago_public_key,
+                   precio_consulta, acepta_mercadopago, acepta_transferencia, acepta_efectivo,
+                   created_at
+            FROM veterinarios WHERE id = $1
+        `, [req.user.id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Veterinario no encontrado' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error obteniendo perfil:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener configuración de pagos
+app.get('/api/veterinario/config-pagos', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT cbu_cvu, alias_cbu, titular_cuenta, mercadopago_public_key,
+                   precio_consulta, acepta_mercadopago, acepta_transferencia, acepta_efectivo
+            FROM veterinarios WHERE id = $1
+        `, [req.user.id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Veterinario no encontrado' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error obteniendo configuración de pagos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar configuración de pagos y ARCA
+app.put('/api/veterinario/config-pagos', authenticateToken, async (req, res) => {
+    const {
+        cbu_cvu,
+        alias_cbu,
+        titular_cuenta,
+        mercadopago_access_token,
+        mercadopago_public_key,
+        precio_consulta,
+        acepta_mercadopago,
+        acepta_transferencia,
+        acepta_efectivo,
+        arca_cuit,
+        arca_api_key,
+        arca_punto_venta
+    } = req.body;
+    
+    try {
+        const result = await pool.query(`
+            UPDATE veterinarios SET
+                cbu_cvu = $1,
+                alias_cbu = $2,
+                titular_cuenta = $3,
+                mercadopago_access_token = $4,
+                mercadopago_public_key = $5,
+                precio_consulta = $6,
+                acepta_mercadopago = $7,
+                acepta_transferencia = $8,
+                acepta_efectivo = $9,
+                arca_cuit = $10,
+                arca_api_key = $11,
+                arca_punto_venta = $12
+            WHERE id = $13
+            RETURNING cbu_cvu, alias_cbu, titular_cuenta, mercadopago_public_key,
+                      precio_consulta, acepta_mercadopago, acepta_transferencia, acepta_efectivo,
+                      arca_cuit, arca_punto_venta
+        `, [
+            cbu_cvu, alias_cbu, titular_cuenta, mercadopago_access_token,
+            mercadopago_public_key, precio_consulta, acepta_mercadopago,
+            acepta_transferencia, acepta_efectivo, arca_cuit, arca_api_key,
+            arca_punto_venta, req.user.id
+        ]);
+        
+        res.json({
+            message: 'Configuración de pagos actualizada exitosamente',
+            config: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error actualizando configuración de pagos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener configuración pública de pagos de un veterinario (para clientes)
+app.get('/api/veterinario/:id/metodos-pago', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT nombre_veterinaria, nombre_veterinario, cbu_cvu, alias_cbu, titular_cuenta,
+                   mercadopago_public_key, precio_consulta, acepta_mercadopago,
+                   acepta_transferencia, acepta_efectivo
+            FROM veterinarios WHERE id = $1
+        `, [req.params.id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Veterinario no encontrado' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error obteniendo métodos de pago:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // Rutas principales
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -779,20 +1902,1505 @@ app.get('/paciente', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'paciente.html'));
 });
 
+// ==================== ENDPOINTS DE SERVICIOS DE VETERINARIA ====================
+
+// Obtener servicios de un veterinario
+app.get('/api/servicios', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM servicios_veterinaria WHERE veterinario_id = $1 ORDER BY orden ASC, nombre ASC',
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo servicios:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener servicios públicos de un veterinario (para clientes)
+app.get('/api/veterinario/:id/servicios', async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, nombre, descripcion, duracion_minutos, precio, icono FROM servicios_veterinaria WHERE veterinario_id = $1 AND activo = true ORDER BY orden ASC, nombre ASC',
+            [req.params.id]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo servicios públicos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Crear servicio
+app.post('/api/servicios', authenticateToken, async (req, res) => {
+    const { nombre, descripcion, duracion_minutos, precio, activo, orden, icono } = req.body;
+    
+    try {
+        const result = await pool.query(`
+            INSERT INTO servicios_veterinaria (
+                veterinario_id, nombre, descripcion, duracion_minutos, 
+                precio, activo, orden, icono
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+        `, [req.user.id, nombre, descripcion, duracion_minutos, precio, activo, orden, icono]);
+        
+        res.json({ message: 'Servicio creado exitosamente', servicio: result.rows[0] });
+    } catch (error) {
+        console.error('Error creando servicio:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar servicio
+app.put('/api/servicios/:id', authenticateToken, async (req, res) => {
+    const { nombre, descripcion, duracion_minutos, precio, activo, orden, icono } = req.body;
+    
+    try {
+        const result = await pool.query(`
+            UPDATE servicios_veterinaria SET
+                nombre = $1, descripcion = $2, duracion_minutos = $3,
+                precio = $4, activo = $5, orden = $6, icono = $7,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $8 AND veterinario_id = $9
+            RETURNING *
+        `, [nombre, descripcion, duracion_minutos, precio, activo, orden, icono, req.params.id, req.user.id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Servicio no encontrado' });
+        }
+        
+        res.json({ message: 'Servicio actualizado exitosamente', servicio: result.rows[0] });
+    } catch (error) {
+        console.error('Error actualizando servicio:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Eliminar servicio
+app.delete('/api/servicios/:id', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'DELETE FROM servicios_veterinaria WHERE id = $1 AND veterinario_id = $2 RETURNING *',
+            [req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Servicio no encontrado' });
+        }
+        
+        res.json({ message: 'Servicio eliminado exitosamente' });
+    } catch (error) {
+        console.error('Error eliminando servicio:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Crear servicios por defecto para un veterinario
+app.post('/api/servicios/crear-defecto', authenticateToken, async (req, res) => {
+    try {
+        const serviciosDefecto = [
+            { nombre: 'Consulta General', descripcion: 'Revisión general de salud', duracion: 30, precio: 5000, icono: 'fa-stethoscope', orden: 1 },
+            { nombre: 'Vacunación', descripcion: 'Aplicación de vacunas', duracion: 20, precio: 3000, icono: 'fa-syringe', orden: 2 },
+            { nombre: 'Desparasitación', descripcion: 'Tratamiento antiparasitario', duracion: 15, precio: 2500, icono: 'fa-pills', orden: 3 },
+            { nombre: 'Cirugía', descripcion: 'Procedimientos quirúrgicos', duracion: 120, precio: 15000, icono: 'fa-user-md', orden: 4 },
+            { nombre: 'Baño y Peluquería', descripcion: 'Servicio de estética', duracion: 60, precio: 4000, icono: 'fa-shower', orden: 5 },
+            { nombre: 'Análisis Clínicos', descripcion: 'Estudios de laboratorio', duracion: 30, precio: 6000, icono: 'fa-flask', orden: 6 },
+            { nombre: 'Radiografía', descripcion: 'Estudios radiológicos', duracion: 30, precio: 8000, icono: 'fa-x-ray', orden: 7 },
+            { nombre: 'Ecografía', descripcion: 'Estudios ecográficos', duracion: 45, precio: 10000, icono: 'fa-heartbeat', orden: 8 }
+        ];
+        
+        for (const servicio of serviciosDefecto) {
+            await pool.query(`
+                INSERT INTO servicios_veterinaria (
+                    veterinario_id, nombre, descripcion, duracion_minutos, 
+                    precio, icono, orden, activo
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+            `, [req.user.id, servicio.nombre, servicio.descripcion, servicio.duracion, servicio.precio, servicio.icono, servicio.orden]);
+        }
+        
+        res.json({ message: 'Servicios por defecto creados exitosamente', cantidad: serviciosDefecto.length });
+    } catch (error) {
+        console.error('Error creando servicios por defecto:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== ENDPOINTS DE REPORTES Y ESTADÍSTICAS ====================
+
+// Dashboard de reportes
+app.get('/api/reportes/dashboard', authenticateToken, async (req, res) => {
+    try {
+        const veterinarioId = req.user.id;
+        const mesActual = new Date();
+        const primerDiaMes = new Date(mesActual.getFullYear(), mesActual.getMonth(), 1);
+        
+        // Ingresos del mes
+        const ingresosResult = await pool.query(`
+            SELECT COALESCE(SUM(total), 0) as total
+            FROM facturas
+            WHERE veterinario_id = $1
+            AND fecha_factura >= $2
+            AND estado = 'pagada'
+        `, [veterinarioId, primerDiaMes]);
+        
+        // Consultas del mes
+        const consultasResult = await pool.query(`
+            SELECT COUNT(*) as total
+            FROM consultas
+            WHERE veterinario_id = $1
+            AND fecha_consulta >= $2
+        `, [veterinarioId, primerDiaMes]);
+        
+        // Citas pendientes
+        const citasResult = await pool.query(`
+            SELECT COUNT(*) as total
+            FROM citas
+            WHERE veterinario_id = $1
+            AND estado IN ('programada', 'confirmada')
+            AND fecha_cita >= CURRENT_DATE
+        `, [veterinarioId]);
+        
+        // Stock bajo
+        const stockResult = await pool.query(`
+            SELECT COUNT(*) as total
+            FROM inventario_productos
+            WHERE veterinario_id = $1
+            AND stock_actual <= stock_minimo
+            AND activo = true
+        `, [veterinarioId]);
+        
+        // Total clientes
+        const clientesResult = await pool.query(`
+            SELECT COUNT(*) as total
+            FROM clientes
+            WHERE veterinario_id = $1
+        `, [veterinarioId]);
+        
+        // Total mascotas
+        const mascotasResult = await pool.query(`
+            SELECT COUNT(*) as total
+            FROM mascotas
+            WHERE veterinario_id = $1
+        `, [veterinarioId]);
+        
+        res.json({
+            ingresos_mes: parseFloat(ingresosResult.rows[0].total),
+            consultas_mes: parseInt(consultasResult.rows[0].total),
+            citas_pendientes: parseInt(citasResult.rows[0].total),
+            stock_bajo: parseInt(stockResult.rows[0].total),
+            total_clientes: parseInt(clientesResult.rows[0].total),
+            total_mascotas: parseInt(mascotasResult.rows[0].total)
+        });
+    } catch (error) {
+        console.error('Error obteniendo dashboard:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Reporte de ingresos por mes
+app.get('/api/reportes/ingresos-mensuales', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                TO_CHAR(fecha_factura, 'YYYY-MM') as mes,
+                SUM(total) as total_ingresos,
+                COUNT(*) as cantidad_facturas
+            FROM facturas
+            WHERE veterinario_id = $1
+            AND estado = 'pagada'
+            AND fecha_factura >= CURRENT_DATE - INTERVAL '12 months'
+            GROUP BY TO_CHAR(fecha_factura, 'YYYY-MM')
+            ORDER BY mes DESC
+        `, [req.user.id]);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo ingresos mensuales:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Reporte de consultas por tipo
+app.get('/api/reportes/consultas-tipo', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                motivo_consulta,
+                COUNT(*) as cantidad
+            FROM consultas
+            WHERE veterinario_id = $1
+            AND fecha_consulta >= CURRENT_DATE - INTERVAL '6 months'
+            GROUP BY motivo_consulta
+            ORDER BY cantidad DESC
+            LIMIT 10
+        `, [req.user.id]);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo consultas por tipo:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Reporte de productos más vendidos
+app.get('/api/reportes/productos-vendidos', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                fi.descripcion,
+                SUM(fi.cantidad) as total_vendido,
+                SUM(fi.subtotal) as total_ingresos
+            FROM factura_items fi
+            JOIN facturas f ON fi.factura_id = f.id
+            WHERE f.veterinario_id = $1
+            AND f.estado = 'pagada'
+            AND f.fecha_factura >= CURRENT_DATE - INTERVAL '6 months'
+            GROUP BY fi.descripcion
+            ORDER BY total_vendido DESC
+            LIMIT 10
+        `, [req.user.id]);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo productos vendidos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== ENDPOINTS DE NOTIFICACIONES MANUALES ====================
+
+// Importar funciones de verificación
+const { verificarAlimentoMascotas, verificarInventarioVeterinario } = require('./services/verificador-alimento');
+
+// Ejecutar verificación manual de alimento
+app.post('/api/notificaciones/verificar-alimento', authenticateToken, async (req, res) => {
+    try {
+        console.log('🔔 Verificación manual de alimento solicitada por:', req.user.email);
+        const resultado = await verificarAlimentoMascotas();
+        res.json(resultado);
+    } catch (error) {
+        console.error('Error en verificación manual:', error);
+        res.status(500).json({ error: 'Error al verificar alimento' });
+    }
+});
+
+// Ejecutar verificación manual de inventario
+app.post('/api/notificaciones/verificar-inventario', authenticateToken, async (req, res) => {
+    try {
+        console.log('🔔 Verificación manual de inventario solicitada por:', req.user.email);
+        const resultado = await verificarInventarioVeterinario();
+        res.json(resultado);
+    } catch (error) {
+        console.error('Error en verificación manual:', error);
+        res.status(500).json({ error: 'Error al verificar inventario' });
+    }
+});
+
+// Ejecutar todas las verificaciones
+app.post('/api/notificaciones/verificar-todo', authenticateToken, async (req, res) => {
+    try {
+        console.log('🔔 Verificación completa solicitada por:', req.user.email);
+        
+        const resultadoAlimento = await verificarAlimentoMascotas();
+        const resultadoInventario = await verificarInventarioVeterinario();
+        
+        res.json({
+            alimento: resultadoAlimento,
+            inventario: resultadoInventario
+        });
+    } catch (error) {
+        console.error('Error en verificación completa:', error);
+        res.status(500).json({ error: 'Error al ejecutar verificaciones' });
+    }
+});
+
+// ==================== RUTAS DE FAQ (PREGUNTAS FRECUENTES) ====================
+
+// Obtener todas las FAQ de un veterinario (público)
+app.get('/api/faq/:veterinarioId', async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, pregunta, respuesta, orden FROM faq WHERE veterinario_id = $1 AND activo = true ORDER BY orden ASC, created_at ASC',
+            [req.params.veterinarioId]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo FAQ:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener FAQ del veterinario autenticado
+app.get('/api/faq', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM faq WHERE veterinario_id = $1 ORDER BY orden ASC, created_at ASC',
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo FAQ:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Crear nueva FAQ
+app.post('/api/faq', authenticateToken, async (req, res) => {
+    const { pregunta, respuesta, orden } = req.body;
+    
+    try {
+        const result = await pool.query(
+            'INSERT INTO faq (veterinario_id, pregunta, respuesta, orden) VALUES ($1, $2, $3, $4) RETURNING *',
+            [req.user.id, pregunta, respuesta, orden || 0]
+        );
+        res.json({ message: 'FAQ creada exitosamente', faq: result.rows[0] });
+    } catch (error) {
+        console.error('Error creando FAQ:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar FAQ
+app.put('/api/faq/:id', authenticateToken, async (req, res) => {
+    const { pregunta, respuesta, orden, activo } = req.body;
+    
+    try {
+        const result = await pool.query(
+            'UPDATE faq SET pregunta = $1, respuesta = $2, orden = $3, activo = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 AND veterinario_id = $6 RETURNING *',
+            [pregunta, respuesta, orden, activo, req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'FAQ no encontrada' });
+        }
+        
+        res.json({ message: 'FAQ actualizada exitosamente', faq: result.rows[0] });
+    } catch (error) {
+        console.error('Error actualizando FAQ:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Eliminar FAQ
+app.delete('/api/faq/:id', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'DELETE FROM faq WHERE id = $1 AND veterinario_id = $2 RETURNING *',
+            [req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'FAQ no encontrada' });
+        }
+        
+        res.json({ message: 'FAQ eliminada exitosamente' });
+    } catch (error) {
+        console.error('Error eliminando FAQ:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== RUTAS DE UBICACIONES Y VALORACIONES ====================
+
+// Obtener todas las veterinarias en el mapa (público)
+app.get('/api/ubicaciones/mapa', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                u.id, u.veterinario_id, u.latitud, u.longitud, u.direccion_completa, 
+                u.ciudad, u.provincia, u.zona,
+                v.nombre_veterinaria, v.nombre_veterinario, v.telefono,
+                COALESCE(AVG(val.puntuacion), 0) as promedio_valoracion,
+                COUNT(val.id) as total_valoraciones
+            FROM ubicaciones u
+            JOIN veterinarios v ON u.veterinario_id = v.id
+            LEFT JOIN valoraciones val ON v.id = val.veterinario_id AND val.aprobado = true
+            WHERE u.visible_en_mapa = true
+            GROUP BY u.id, u.veterinario_id, u.latitud, u.longitud, u.direccion_completa, 
+                     u.ciudad, u.provincia, u.zona, v.nombre_veterinaria, v.nombre_veterinario, v.telefono
+            ORDER BY promedio_valoracion DESC
+        `);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo mapa:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener ubicación del veterinario autenticado
+app.get('/api/ubicaciones/mi-ubicacion', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM ubicaciones WHERE veterinario_id = $1',
+            [req.user.id]
+        );
+        res.json(result.rows[0] || null);
+    } catch (error) {
+        console.error('Error obteniendo ubicación:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Crear o actualizar ubicación
+app.post('/api/ubicaciones', authenticateToken, async (req, res) => {
+    const { latitud, longitud, direccion_completa, ciudad, provincia, codigo_postal, zona, visible_en_mapa } = req.body;
+    
+    try {
+        const result = await pool.query(`
+            INSERT INTO ubicaciones (veterinario_id, latitud, longitud, direccion_completa, ciudad, provincia, codigo_postal, zona, visible_en_mapa)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (veterinario_id) 
+            DO UPDATE SET 
+                latitud = $2, longitud = $3, direccion_completa = $4, ciudad = $5, 
+                provincia = $6, codigo_postal = $7, zona = $8, visible_en_mapa = $9,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+        `, [req.user.id, latitud, longitud, direccion_completa, ciudad, provincia, codigo_postal, zona, visible_en_mapa !== false]);
+        
+        res.json({ message: 'Ubicación guardada exitosamente', ubicacion: result.rows[0] });
+    } catch (error) {
+        console.error('Error guardando ubicación:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener valoraciones de un veterinario (público)
+app.get('/api/valoraciones/:veterinarioId', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT v.*, c.nombre, c.apellido
+            FROM valoraciones v
+            LEFT JOIN clientes c ON v.cliente_id = c.id
+            WHERE v.veterinario_id = $1 AND v.aprobado = true
+            ORDER BY v.created_at DESC
+        `, [req.params.veterinarioId]);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo valoraciones:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Crear valoración (requiere ser cliente)
+app.post('/api/valoraciones', authenticateToken, async (req, res) => {
+    const { veterinario_id, puntuacion, categoria, comentario } = req.body;
+    
+    try {
+        // Verificar que el usuario es cliente del veterinario
+        const clienteCheck = await pool.query(
+            'SELECT id FROM clientes WHERE id = $1 AND veterinario_id = $2',
+            [req.user.clienteId, veterinario_id]
+        );
+        
+        if (clienteCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Solo los clientes pueden valorar' });
+        }
+        
+        const result = await pool.query(
+            'INSERT INTO valoraciones (veterinario_id, cliente_id, puntuacion, categoria, comentario) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+            [veterinario_id, req.user.clienteId, puntuacion, categoria, comentario]
+        );
+        
+        res.json({ message: 'Valoración enviada. Pendiente de aprobación.', valoracion: result.rows[0] });
+    } catch (error) {
+        console.error('Error creando valoración:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Aprobar/rechazar valoración
+app.put('/api/valoraciones/:id/aprobar', authenticateToken, async (req, res) => {
+    const { aprobado } = req.body;
+    
+    try {
+        const result = await pool.query(
+            'UPDATE valoraciones SET aprobado = $1 WHERE id = $2 AND veterinario_id = $3 RETURNING *',
+            [aprobado, req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Valoración no encontrada' });
+        }
+        
+        res.json({ message: 'Valoración actualizada', valoracion: result.rows[0] });
+    } catch (error) {
+        console.error('Error aprobando valoración:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== RUTAS DE PROTOCOLOS DE TRABAJO ====================
+
+// Obtener protocolos del veterinario autenticado
+app.get('/api/protocolos', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM protocolos_trabajo WHERE veterinario_id = $1 ORDER BY orden ASC, created_at ASC',
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo protocolos:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Crear nuevo protocolo
+app.post('/api/protocolos', authenticateToken, async (req, res) => {
+    const { titulo, descripcion, categoria, contenido, orden } = req.body;
+    
+    try {
+        const result = await pool.query(
+            'INSERT INTO protocolos_trabajo (veterinario_id, titulo, descripcion, categoria, contenido, orden) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+            [req.user.id, titulo, descripcion, categoria, contenido, orden || 0]
+        );
+        res.json({ message: 'Protocolo creado exitosamente', protocolo: result.rows[0] });
+    } catch (error) {
+        console.error('Error creando protocolo:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar protocolo
+app.put('/api/protocolos/:id', authenticateToken, async (req, res) => {
+    const { titulo, descripcion, categoria, contenido, orden, activo } = req.body;
+    
+    try {
+        const result = await pool.query(
+            'UPDATE protocolos_trabajo SET titulo = $1, descripcion = $2, categoria = $3, contenido = $4, orden = $5, activo = $6, updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND veterinario_id = $8 RETURNING *',
+            [titulo, descripcion, categoria, contenido, orden, activo, req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Protocolo no encontrado' });
+        }
+        
+        res.json({ message: 'Protocolo actualizado exitosamente', protocolo: result.rows[0] });
+    } catch (error) {
+        console.error('Error actualizando protocolo:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Eliminar protocolo
+app.delete('/api/protocolos/:id', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'DELETE FROM protocolos_trabajo WHERE id = $1 AND veterinario_id = $2 RETURNING *',
+            [req.params.id, req.user.id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Protocolo no encontrado' });
+        }
+        
+        res.json({ message: 'Protocolo eliminado exitosamente' });
+    } catch (error) {
+        console.error('Error eliminando protocolo:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== SISTEMA DE LICENCIAS ====================
+
+// Función para generar clave de licencia única
+function generarClaveLicencia() {
+    const prefix = 'MUNDOPATAS';
+    const year = new Date().getFullYear();
+    const random = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const timestamp = Date.now().toString(36).toUpperCase();
+    return `${prefix}-${year}-${random}-${timestamp}`;
+}
+
+// Generar nueva licencia (solo admin)
+app.post('/api/admin/licencias/generar', async (req, res) => {
+    const { tipo, duracion_meses, cantidad, notas } = req.body;
+    
+    // Verificación básica de admin (mejorar con autenticación real)
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+    
+    try {
+        const licenciasGeneradas = [];
+        const cantidadGenerar = cantidad || 1;
+        
+        for (let i = 0; i < cantidadGenerar; i++) {
+            const clave = generarClaveLicencia();
+            const result = await pool.query(`
+                INSERT INTO licencias (clave, tipo, notas)
+                VALUES ($1, $2, $3)
+                RETURNING *
+            `, [clave, tipo || 'PREMIUM', notas]);
+            
+            licenciasGeneradas.push(result.rows[0]);
+        }
+        
+        res.json({ 
+            message: `${cantidadGenerar} licencia(s) generada(s) exitosamente`,
+            licencias: licenciasGeneradas
+        });
+    } catch (error) {
+        console.error('Error generando licencias:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Validar y activar licencia
+app.post('/api/licencias/activar', authenticateToken, async (req, res) => {
+    const { clave } = req.body;
+    
+    try {
+        // Verificar que la licencia existe y está disponible
+        const licenciaResult = await pool.query(`
+            SELECT * FROM licencias WHERE clave = $1
+        `, [clave]);
+        
+        if (licenciaResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Clave de licencia inválida' });
+        }
+        
+        const licencia = licenciaResult.rows[0];
+        
+        // Verificar que no esté ya activada
+        if (licencia.activa || licencia.estado !== 'disponible') {
+            return res.status(400).json({ error: 'Esta licencia ya ha sido activada' });
+        }
+        
+        // Verificar que el veterinario no tenga ya una licencia activa
+        const veterinarioResult = await pool.query(`
+            SELECT licencia_activa, tipo_cuenta FROM veterinarios WHERE id = $1
+        `, [req.user.id]);
+        
+        if (veterinarioResult.rows[0].licencia_activa) {
+            return res.status(400).json({ error: 'Ya tienes una licencia activa' });
+        }
+        
+        // Calcular fecha de expiración (1 año por defecto)
+        const fechaExpiracion = new Date();
+        fechaExpiracion.setFullYear(fechaExpiracion.getFullYear() + 1);
+        
+        // Activar licencia
+        await pool.query(`
+            UPDATE licencias SET
+                veterinario_id = $1,
+                estado = 'activa',
+                fecha_activacion = CURRENT_TIMESTAMP,
+                fecha_expiracion = $2,
+                activa = true,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $3
+        `, [req.user.id, fechaExpiracion, licencia.id]);
+        
+        // Actualizar veterinario
+        await pool.query(`
+            UPDATE veterinarios SET
+                licencia_activa = true,
+                tipo_cuenta = $1,
+                fecha_expiracion_demo = NULL
+            WHERE id = $2
+        `, [licencia.tipo, req.user.id]);
+        
+        res.json({ 
+            message: 'Licencia activada exitosamente',
+            tipo: licencia.tipo,
+            fecha_expiracion: fechaExpiracion
+        });
+    } catch (error) {
+        console.error('Error activando licencia:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Validar clave de licencia (sin activar)
+app.post('/api/licencias/validar', async (req, res) => {
+    const { clave } = req.body;
+    
+    try {
+        const result = await pool.query(`
+            SELECT id, tipo, estado, activa FROM licencias WHERE clave = $1
+        `, [clave]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ valid: false, error: 'Clave de licencia inválida' });
+        }
+        
+        const licencia = result.rows[0];
+        
+        if (licencia.activa || licencia.estado !== 'disponible') {
+            return res.status(400).json({ valid: false, error: 'Esta licencia ya ha sido activada' });
+        }
+        
+        res.json({ 
+            valid: true,
+            tipo: licencia.tipo,
+            message: 'Clave válida. Lista para activar.'
+        });
+    } catch (error) {
+        console.error('Error validando licencia:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener estado de licencia del veterinario
+app.get('/api/licencias/mi-licencia', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT l.*, v.tipo_cuenta, v.fecha_expiracion_demo
+            FROM licencias l
+            RIGHT JOIN veterinarios v ON l.veterinario_id = v.id
+            WHERE v.id = $1 AND l.activa = true
+        `, [req.user.id]);
+        
+        if (result.rows.length === 0) {
+            // No tiene licencia activa
+            const vetResult = await pool.query(`
+                SELECT tipo_cuenta, fecha_expiracion_demo FROM veterinarios WHERE id = $1
+            `, [req.user.id]);
+            
+            return res.json({
+                tiene_licencia: false,
+                tipo_cuenta: vetResult.rows[0].tipo_cuenta,
+                fecha_expiracion_demo: vetResult.rows[0].fecha_expiracion_demo
+            });
+        }
+        
+        res.json({
+            tiene_licencia: true,
+            licencia: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error obteniendo licencia:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Listar todas las licencias (solo admin)
+app.get('/api/admin/licencias', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+    
+    try {
+        const result = await pool.query(`
+            SELECT l.*, v.nombre_veterinario, v.email
+            FROM licencias l
+            LEFT JOIN veterinarios v ON l.veterinario_id = v.id
+            ORDER BY l.created_at DESC
+        `);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error listando licencias:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Listar todos los veterinarios (solo admin)
+app.get('/api/admin/veterinarios', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+    
+    try {
+        const result = await pool.query(`
+            SELECT id, nombre_veterinario, nombre_veterinaria, email, telefono, 
+                   direccion, tipo_cuenta, licencia_activa, fecha_expiracion_demo, created_at
+            FROM veterinarios
+            ORDER BY created_at DESC
+        `);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error listando veterinarios:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Convertir cuenta DEMO a PREMIUM al activar licencia
+app.post('/api/veterinario/convertir-demo', authenticateToken, async (req, res) => {
+    const { clave_licencia } = req.body;
+    
+    try {
+        // Verificar que es cuenta demo
+        const vetResult = await pool.query(`
+            SELECT tipo_cuenta FROM veterinarios WHERE id = $1
+        `, [req.user.id]);
+        
+        if (vetResult.rows[0].tipo_cuenta !== 'DEMO') {
+            return res.status(400).json({ error: 'Esta cuenta ya no es DEMO' });
+        }
+        
+        // Activar licencia (reutiliza el endpoint de activación)
+        const licenciaResult = await pool.query(`
+            SELECT * FROM licencias WHERE clave = $1 AND estado = 'disponible' AND activa = false
+        `, [clave_licencia]);
+        
+        if (licenciaResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Clave de licencia inválida o ya activada' });
+        }
+        
+        const licencia = licenciaResult.rows[0];
+        const fechaExpiracion = new Date();
+        fechaExpiracion.setFullYear(fechaExpiracion.getFullYear() + 1);
+        
+        // Activar licencia
+        await pool.query(`
+            UPDATE licencias SET
+                veterinario_id = $1,
+                estado = 'activa',
+                fecha_activacion = CURRENT_TIMESTAMP,
+                fecha_expiracion = $2,
+                activa = true,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $3
+        `, [req.user.id, fechaExpiracion, licencia.id]);
+        
+        // Actualizar veterinario
+        await pool.query(`
+            UPDATE veterinarios SET
+                licencia_activa = true,
+                tipo_cuenta = $1,
+                fecha_expiracion_demo = NULL
+            WHERE id = $2
+        `, [licencia.tipo, req.user.id]);
+        
+        res.json({ 
+            message: '¡Felicitaciones! Tu cuenta DEMO ha sido convertida a PREMIUM',
+            tipo: licencia.tipo,
+            fecha_expiracion: fechaExpiracion
+        });
+    } catch (error) {
+        console.error('Error convirtiendo demo:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== GESTIÓN PERSONAL DE CLIENTES (ADMIN) ====================
+
+// Registrar nueva venta de licencia
+app.post('/api/admin/mis-clientes/registrar-venta', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    const {
+        nombre_completo, email, telefono, whatsapp, clinica_nombre,
+        ciudad, provincia, monto_pagado, metodo_pago, fecha_pago,
+        comprobante_numero, notas, licencia_id
+    } = req.body;
+
+    try {
+        const result = await pool.query(`
+            INSERT INTO mis_clientes_ventas (
+                veterinario_id, licencia_id, nombre_completo, email, telefono,
+                whatsapp, clinica_nombre, ciudad, provincia, monto_pagado,
+                metodo_pago, fecha_pago, comprobante_numero, notas
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            RETURNING *
+        `, [null, licencia_id, nombre_completo, email, telefono, whatsapp,
+            clinica_nombre, ciudad, provincia, monto_pagado, metodo_pago,
+            fecha_pago, comprobante_numero, notas]);
+
+        res.json({
+            message: 'Venta registrada exitosamente',
+            venta: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error registrando venta:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Listar todas las ventas
+app.get('/api/admin/mis-clientes/ventas', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    try {
+        const result = await pool.query(`
+            SELECT 
+                mcv.*,
+                l.clave as licencia_clave,
+                l.tipo as licencia_tipo,
+                l.estado as licencia_estado,
+                l.fecha_activacion,
+                l.fecha_expiracion,
+                v.nombre_veterinario,
+                v.email as veterinario_email
+            FROM mis_clientes_ventas mcv
+            LEFT JOIN licencias l ON mcv.licencia_id = l.id
+            LEFT JOIN veterinarios v ON l.veterinario_id = v.id
+            ORDER BY mcv.created_at DESC
+        `);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error listando ventas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener detalles de una venta
+app.get('/api/admin/mis-clientes/ventas/:id', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    try {
+        const ventaResult = await pool.query(`
+            SELECT 
+                mcv.*,
+                l.clave as licencia_clave,
+                l.tipo as licencia_tipo,
+                l.estado as licencia_estado,
+                l.fecha_activacion,
+                l.fecha_expiracion,
+                v.nombre_veterinario,
+                v.email as veterinario_email
+            FROM mis_clientes_ventas mcv
+            LEFT JOIN licencias l ON mcv.licencia_id = l.id
+            LEFT JOIN veterinarios v ON l.veterinario_id = v.id
+            WHERE mcv.id = $1
+        `, [req.params.id]);
+
+        if (ventaResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Venta no encontrada' });
+        }
+
+        // Obtener historial de pagos
+        const pagosResult = await pool.query(`
+            SELECT * FROM historial_pagos_clientes
+            WHERE cliente_venta_id = $1
+            ORDER BY fecha_pago DESC
+        `, [req.params.id]);
+
+        res.json({
+            venta: ventaResult.rows[0],
+            historial_pagos: pagosResult.rows
+        });
+    } catch (error) {
+        console.error('Error obteniendo detalles de venta:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Actualizar información de venta
+app.put('/api/admin/mis-clientes/ventas/:id', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    const {
+        nombre_completo, email, telefono, whatsapp, clinica_nombre,
+        ciudad, provincia, notas, seguimiento
+    } = req.body;
+
+    try {
+        const result = await pool.query(`
+            UPDATE mis_clientes_ventas SET
+                nombre_completo = COALESCE($1, nombre_completo),
+                email = COALESCE($2, email),
+                telefono = COALESCE($3, telefono),
+                whatsapp = COALESCE($4, whatsapp),
+                clinica_nombre = COALESCE($5, clinica_nombre),
+                ciudad = COALESCE($6, ciudad),
+                provincia = COALESCE($7, provincia),
+                notas = COALESCE($8, notas),
+                seguimiento = COALESCE($9, seguimiento),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $10
+            RETURNING *
+        `, [nombre_completo, email, telefono, whatsapp, clinica_nombre,
+            ciudad, provincia, notas, seguimiento, req.params.id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Venta no encontrada' });
+        }
+
+        res.json({
+            message: 'Venta actualizada exitosamente',
+            venta: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error actualizando venta:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Registrar pago adicional (renovación)
+app.post('/api/admin/mis-clientes/registrar-pago', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    const {
+        cliente_venta_id, monto, metodo_pago, fecha_pago,
+        comprobante_numero, tipo, concepto, notas
+    } = req.body;
+
+    try {
+        const result = await pool.query(`
+            INSERT INTO historial_pagos_clientes (
+                cliente_venta_id, monto, metodo_pago, fecha_pago,
+                comprobante_numero, tipo, concepto, notas
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+        `, [cliente_venta_id, monto, metodo_pago, fecha_pago,
+            comprobante_numero, tipo, concepto, notas]);
+
+        res.json({
+            message: 'Pago registrado exitosamente',
+            pago: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error registrando pago:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Obtener estadísticas de ventas
+app.get('/api/admin/mis-clientes/estadisticas', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    try {
+        // Total de ventas
+        const totalVentas = await pool.query(`
+            SELECT COUNT(*) as total FROM mis_clientes_ventas
+        `);
+
+        // Ingresos totales
+        const ingresosTotales = await pool.query(`
+            SELECT 
+                SUM(monto_pagado) as total,
+                COUNT(*) as cantidad
+            FROM mis_clientes_ventas
+            WHERE monto_pagado IS NOT NULL
+        `);
+
+        // Ingresos del mes actual
+        const ingresosMes = await pool.query(`
+            SELECT 
+                SUM(monto_pagado) as total,
+                COUNT(*) as cantidad
+            FROM mis_clientes_ventas
+            WHERE DATE_TRUNC('month', fecha_pago) = DATE_TRUNC('month', CURRENT_DATE)
+        `);
+
+        // Ventas por método de pago
+        const ventasPorMetodo = await pool.query(`
+            SELECT 
+                metodo_pago,
+                COUNT(*) as cantidad,
+                SUM(monto_pagado) as total
+            FROM mis_clientes_ventas
+            WHERE metodo_pago IS NOT NULL
+            GROUP BY metodo_pago
+        `);
+
+        // Próximas renovaciones (licencias que vencen en 30 días)
+        const proximasRenovaciones = await pool.query(`
+            SELECT 
+                mcv.*,
+                l.fecha_expiracion,
+                EXTRACT(DAY FROM (l.fecha_expiracion - CURRENT_DATE)) as dias_restantes
+            FROM mis_clientes_ventas mcv
+            JOIN licencias l ON mcv.licencia_id = l.id
+            WHERE l.fecha_expiracion IS NOT NULL
+            AND l.fecha_expiracion > CURRENT_DATE
+            AND l.fecha_expiracion <= CURRENT_DATE + INTERVAL '30 days'
+            ORDER BY l.fecha_expiracion ASC
+        `);
+
+        res.json({
+            total_ventas: parseInt(totalVentas.rows[0].total),
+            ingresos_totales: parseFloat(ingresosTotales.rows[0].total || 0),
+            cantidad_pagos: parseInt(ingresosTotales.rows[0].cantidad || 0),
+            ingresos_mes_actual: parseFloat(ingresosMes.rows[0].total || 0),
+            ventas_mes_actual: parseInt(ingresosMes.rows[0].cantidad || 0),
+            ventas_por_metodo: ventasPorMetodo.rows,
+            proximas_renovaciones: proximasRenovaciones.rows
+        });
+    } catch (error) {
+        console.error('Error obteniendo estadísticas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Eliminar venta
+app.delete('/api/admin/mis-clientes/ventas/:id', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== 'Bearer admin-mundopatas-2024') {
+        return res.status(401).json({ error: 'No autorizado' });
+    }
+
+    try {
+        // Primero eliminar pagos relacionados
+        await pool.query(`
+            DELETE FROM historial_pagos_clientes WHERE cliente_venta_id = $1
+        `, [req.params.id]);
+
+        // Luego eliminar la venta
+        const result = await pool.query(`
+            DELETE FROM mis_clientes_ventas WHERE id = $1 RETURNING *
+        `, [req.params.id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Venta no encontrada' });
+        }
+
+        res.json({ message: 'Venta eliminada exitosamente' });
+    } catch (error) {
+        console.error('Error eliminando venta:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ==================== SISTEMA DE LICENCIAS ====================
+
+// Middleware de autenticación de admin
+function authenticateAdmin(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (token !== 'admin-mundopatas-2024') {
+        return res.status(403).json({ error: 'Acceso denegado. Se requiere autenticación de administrador.' });
+    }
+    
+    next();
+}
+
+// Endpoint para generar licencias (ADMIN)
+app.post('/api/admin/licencias/generar', authenticateAdmin, async (req, res) => {
+    const { tipo = 'PREMIUM', cantidad = 1, notas = '' } = req.body;
+    
+    if (cantidad < 1 || cantidad > 100) {
+        return res.status(400).json({ error: 'La cantidad debe estar entre 1 y 100' });
+    }
+    
+    try {
+        const licenciasGeneradas = [];
+        
+        for (let i = 0; i < cantidad; i++) {
+            // Generar clave única
+            const year = new Date().getFullYear();
+            const random = Math.random().toString(36).substring(2, 10).toUpperCase();
+            const timestamp = Date.now().toString(36).toUpperCase();
+            const clave = `MUNDOPATAS-${year}-${random}-${timestamp}`;
+            
+            const result = await pool.query(`
+                INSERT INTO licencias (clave, tipo, estado, notas)
+                VALUES ($1, $2, 'disponible', $3)
+                RETURNING *
+            `, [clave, tipo, notas]);
+            
+            licenciasGeneradas.push(result.rows[0]);
+        }
+        
+        res.json({
+            message: `${cantidad} licencia(s) generada(s) exitosamente`,
+            licencias: licenciasGeneradas
+        });
+    } catch (error) {
+        console.error('Error generando licencias:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint para listar todas las licencias (ADMIN)
+app.get('/api/admin/licencias', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT l.*, v.nombre_veterinario, v.email
+            FROM licencias l
+            LEFT JOIN veterinarios v ON l.veterinario_id = v.id
+            ORDER BY l.created_at DESC
+        `);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo licencias:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint para obtener clientes del panel de administración
+app.get('/api/admin/clients', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                v.id,
+                v.nombre_veterinario as veterinario,
+                v.email,
+                v.telefono,
+                v.direccion,
+                v.tipo_cuenta as plan,
+                v.licencia_activa,
+                v.created_at as "fechaInicio",
+                CASE 
+                    WHEN v.licencia_activa = true THEN 'activo'
+                    ELSE 'inactivo'
+                END as estado,
+                l.clave as "licenseKey",
+                l.fecha_expiracion as "fechaVencimiento",
+                CASE 
+                    WHEN v.tipo_cuenta = 'DEMO' THEN 0
+                    WHEN v.tipo_cuenta = 'BASICO' THEN 30000
+                    WHEN v.tipo_cuenta = 'PROFESIONAL' THEN 50000
+                    WHEN v.tipo_cuenta = 'PREMIUM' THEN 50000
+                    ELSE 0
+                END as "ingresoMensual",
+                COALESCE(v.nombre_veterinaria, 'Veterinaria ' || v.nombre_veterinario) as veterinaria
+            FROM veterinarios v
+            LEFT JOIN licencias l ON l.veterinario_id = v.id AND l.activa = true
+            WHERE v.tipo_cuenta != 'DEMO'
+            ORDER BY v.created_at DESC
+        `);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo clientes:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint para listar todos los veterinarios registrados (ADMIN)
+app.get('/api/admin/veterinarios', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                id,
+                nombre_veterinario,
+                nombre_veterinaria,
+                email,
+                telefono,
+                direccion,
+                licencia_activa,
+                tipo_cuenta,
+                fecha_expiracion_demo,
+                created_at
+            FROM veterinarios
+            ORDER BY created_at DESC
+        `);
+        
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error obteniendo veterinarios:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint para generar y asignar licencia directamente a un veterinario (ADMIN)
+app.post('/api/admin/veterinarios/:id/generar-licencia', authenticateAdmin, async (req, res) => {
+    const veterinarioId = parseInt(req.params.id);
+    const { tipo = 'PREMIUM', notas = '' } = req.body;
+    
+    try {
+        // Verificar que el veterinario existe
+        const vetResult = await pool.query(
+            'SELECT * FROM veterinarios WHERE id = $1',
+            [veterinarioId]
+        );
+        
+        if (vetResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Veterinario no encontrado' });
+        }
+        
+        const veterinario = vetResult.rows[0];
+        
+        // Verificar si ya tiene una licencia activa
+        if (veterinario.licencia_activa) {
+            return res.status(400).json({ 
+                error: 'Este veterinario ya tiene una licencia activa',
+                veterinario: {
+                    nombre: veterinario.nombre_veterinario,
+                    email: veterinario.email
+                }
+            });
+        }
+        
+        // Generar clave única
+        const year = new Date().getFullYear();
+        const random = Math.random().toString(36).substring(2, 10).toUpperCase();
+        const timestamp = Date.now().toString(36).toUpperCase();
+        const clave = `MUNDOPATAS-${year}-${random}-${timestamp}`;
+        
+        // Crear la licencia
+        const licenciaResult = await pool.query(`
+            INSERT INTO licencias (clave, tipo, estado, notas, veterinario_id, fecha_activacion, fecha_expiracion, activa)
+            VALUES ($1, $2, 'activa', $3, $4, NOW(), NOW() + INTERVAL '1 year', true)
+            RETURNING *
+        `, [clave, tipo, `${notas} - Generada para: ${veterinario.nombre_veterinario} (${veterinario.email})`, veterinarioId]);
+        
+        // Actualizar el veterinario
+        await pool.query(`
+            UPDATE veterinarios SET
+                licencia_activa = true,
+                tipo_cuenta = $1,
+                fecha_expiracion_demo = NULL
+            WHERE id = $2
+        `, [tipo, veterinarioId]);
+        
+        res.json({
+            message: 'Licencia generada y activada exitosamente',
+            licencia: licenciaResult.rows[0],
+            veterinario: {
+                id: veterinario.id,
+                nombre: veterinario.nombre_veterinario,
+                email: veterinario.email,
+                tipo_cuenta: tipo
+            }
+        });
+    } catch (error) {
+        console.error('Error generando licencia para veterinario:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint para validar y activar licencia
+app.post('/api/validate-license-key', authenticateToken, async (req, res) => {
+    const { licenseKey } = req.body;
+    
+    console.log('📝 Intentando validar licencia:', { 
+        veterinarioId: req.user.id, 
+        licenseKey: licenseKey ? licenseKey.substring(0, 20) + '...' : 'undefined' 
+    });
+    
+    if (!licenseKey) {
+        console.log('❌ Error: Clave de licencia no proporcionada');
+        return res.status(400).json({ error: 'Clave de licencia requerida' });
+    }
+    
+    try {
+        // Verificar si el veterinario ya tiene una licencia activa
+        const vetResult = await pool.query(
+            'SELECT licencia_activa, tipo_cuenta FROM veterinarios WHERE id = $1',
+            [req.user.id]
+        );
+        
+        if (vetResult.rows.length === 0) {
+            console.log('❌ Error: Veterinario no encontrado');
+            return res.status(404).json({ error: 'Veterinario no encontrado' });
+        }
+        
+        const veterinario = vetResult.rows[0];
+        console.log('👤 Veterinario encontrado:', { 
+            id: req.user.id, 
+            licencia_activa: veterinario.licencia_activa,
+            tipo_cuenta: veterinario.tipo_cuenta 
+        });
+        
+        if (veterinario.licencia_activa) {
+            console.log('⚠️  Veterinario ya tiene licencia activa');
+            return res.status(400).json({ 
+                error: 'Ya tienes una licencia activa',
+                details: `Tu cuenta es ${veterinario.tipo_cuenta}. Si necesitas cambiar de plan, contacta a soporte.`
+            });
+        }
+        
+        // Verificar que la clave existe y está disponible
+        const licenciaResult = await pool.query(
+            'SELECT * FROM licencias WHERE clave = $1',
+            [licenseKey]
+        );
+        
+        if (licenciaResult.rows.length === 0) {
+            console.log('❌ Error: Clave de licencia no existe en la base de datos');
+            return res.status(404).json({ error: 'Clave de licencia inválida. Verifica que esté escrita correctamente.' });
+        }
+        
+        const licencia = licenciaResult.rows[0];
+        console.log('🔑 Licencia encontrada:', { 
+            id: licencia.id, 
+            tipo: licencia.tipo, 
+            estado: licencia.estado,
+            activa: licencia.activa,
+            veterinario_id: licencia.veterinario_id
+        });
+        
+        if (licencia.estado !== 'disponible' || licencia.activa) {
+            console.log('⚠️  Licencia ya activada o no disponible');
+            return res.status(400).json({ 
+                error: 'Esta licencia ya ha sido activada',
+                details: 'Esta clave ya fue utilizada. Contacta a soporte para obtener una nueva licencia.'
+            });
+        }
+        
+        // Activar la licencia
+        const fechaExpiracion = new Date();
+        fechaExpiracion.setFullYear(fechaExpiracion.getFullYear() + 1); // 1 año desde hoy
+        
+        console.log('✅ Activando licencia...');
+        
+        await pool.query(`
+            UPDATE licencias SET
+                veterinario_id = $1,
+                estado = 'activa',
+                fecha_activacion = NOW(),
+                fecha_expiracion = $2,
+                activa = true,
+                updated_at = NOW()
+            WHERE clave = $3
+        `, [req.user.id, fechaExpiracion, licenseKey]);
+        
+        // Actualizar el veterinario
+        await pool.query(`
+            UPDATE veterinarios SET
+                licencia_activa = true,
+                tipo_cuenta = $1,
+                fecha_expiracion_demo = NULL
+            WHERE id = $2
+        `, [licencia.tipo, req.user.id]);
+        
+        console.log('🎉 Licencia activada exitosamente para veterinario:', req.user.id);
+        
+        res.json({
+            message: '¡Licencia activada exitosamente!',
+            plan: licencia.tipo,
+            features: ['Acceso completo', 'Sin límites', 'Soporte prioritario', 'Actualizaciones gratuitas'],
+            fecha_expiracion: fechaExpiracion
+        });
+    } catch (error) {
+        console.error('❌ Error activando licencia:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // ==================== BOT DE NOTIFICACIONES AUTOMÁTICO ====================
 
-// Configurar cron job para verificación automática de alimento (si está habilitado)
+// Configurar cron job para verificaciones automáticas (si está habilitado)
 if (CRON_ENABLED) {
     // Ejecutar todos los días a las 9:00 AM
     cron.schedule('0 9 * * *', async () => {
         console.log('');
         console.log('═══════════════════════════════════════════════════════════');
-        console.log('🤖 CRON: Ejecutando verificación automática de alimento');
+        console.log('🤖 CRON: Ejecutando verificaciones automáticas');
         console.log('═══════════════════════════════════════════════════════════');
         
         try {
-            const resultado = await verificarAlimentoMascotas();
-            console.log('✅ Verificación completada:', resultado);
+            // Verificar alimento de mascotas
+            console.log('📦 Verificando alimento de mascotas...');
+            const resultadoAlimento = await verificarAlimentoMascotas();
+            console.log('✅ Alimento verificado:', resultadoAlimento);
+            
+            // Verificar inventario de veterinarios
+            console.log('📊 Verificando inventario...');
+            const resultadoInventario = await verificarInventarioVeterinario();
+            console.log('✅ Inventario verificado:', resultadoInventario);
+            
         } catch (error) {
             console.error('❌ Error en verificación automática:', error);
         }
@@ -804,6 +3412,8 @@ if (CRON_ENABLED) {
     });
     
     console.log('✅ Bot de notificaciones automático habilitado (9:00 AM diario)');
+    console.log('   - Verificación de alimento de mascotas');
+    console.log('   - Verificación de inventario (stock bajo y vencimientos)');
 } else {
     console.log('ℹ️  Bot automático deshabilitado. Usar Task Scheduler o ejecutar manualmente.');
 }
